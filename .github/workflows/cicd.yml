@@ -17,13 +17,59 @@ jobs:
       - name: 🔑 Log in to GitHub Container Registry
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-      - name: 🏗️ Build and push app image
+
+      - name: 🏗️ Build and push app image (commit + latest)
         run: |
           USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME=ghcr.io/$USERNAME/assetnext:latest
-          echo "📦 Building image: $IMAGE_NAME"
-          docker build -t $IMAGE_NAME .
-          docker push $IMAGE_NAME
+          SHORT_SHA=${GITHUB_SHA::7}
+
+          IMAGE_BASE=ghcr.io/$USERNAME/assetnext
+          COMMIT_IMAGE=$IMAGE_BASE:$SHORT_SHA
+          LATEST_IMAGE=$IMAGE_BASE:latest
+
+          echo "📦 Building image:"
+          echo " - $COMMIT_IMAGE"
+          echo " - $LATEST_IMAGE"
+
+          docker build \
+            -t $COMMIT_IMAGE \
+            -t $LATEST_IMAGE \
+            .
+
+          docker push $COMMIT_IMAGE
+          docker push $LATEST_IMAGE
+
+      - name: 🧹 Cleanup old GHCR images (keep last 2)
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
+          PACKAGE=assetnext
+
+          echo "📦 Fetching image versions..."
+          VERSIONS=$(curl -s \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions)
+
+          IDS=$(echo "$VERSIONS" | jq -r '.[].id')
+
+          KEEP=2
+          COUNT=0
+
+          for ID in $IDS; do
+            COUNT=$((COUNT+1))
+            if [ $COUNT -gt $KEEP ]; then
+              echo "🗑️ Deleting image version ID: $ID"
+              curl -X DELETE \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions/$ID
+            else
+              echo "✅ Keeping image version ID: $ID"
+            fi
+          done
+
       - name: 🚀 Deploy to remote server
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -33,13 +79,15 @@ jobs:
           command_timeout: 20m
           script: |
             set -e
+
             USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
             APP_IMAGE=ghcr.io/$USERNAME/assetnext:latest
+
             DB_CONTAINER=assetnext_db
             APP_CONTAINER=assetnext_app
             NETWORK_NAME=asset_network
 
-            echo "🧹 Stopping existing app container (if any)..."
+            echo "🧹 Stopping existing app container..."
             docker stop $APP_CONTAINER || true
             docker rm $APP_CONTAINER || true
 
@@ -55,7 +103,6 @@ jobs:
 
             echo "🐘 Ensuring Postgres container is running..."
             if ! docker ps --format '{{.Names}}' | grep -q "^${DB_CONTAINER}$"; then
-              echo "Starting new Postgres container..."
               docker rm $DB_CONTAINER 2>/dev/null || true
               docker run -d \
                 --name $DB_CONTAINER \
@@ -67,11 +114,8 @@ jobs:
                 -v asset_pgdata:/var/lib/postgresql/data \
                 --restart unless-stopped \
                 postgres:15-alpine
-              echo "⏳ Waiting 15s for DB to initialize..."
               sleep 15
             else
-              echo "Postgres container already running"
-              # Ensure it's on the right network
               docker network connect $NETWORK_NAME $DB_CONTAINER 2>/dev/null || true
             fi
 
@@ -100,14 +144,10 @@ jobs:
 
             echo "🔍 Checking container status..."
             if docker ps --format '{{.Names}}' | grep -q "^${APP_CONTAINER}$"; then
-              echo "✅ Container is running!"
-              echo "📋 Container logs (last 20 lines):"
+              echo "✅ Deployment successful!"
               docker logs --tail 20 $APP_CONTAINER
             else
-              echo "❌ Container failed to start!"
-              echo "📋 Container logs:"
-              docker logs $APP_CONTAINER 2>&1 || true
+              echo "❌ Deployment failed!"
+              docker logs $APP_CONTAINER || true
               exit 1
             fi
-
-            echo "✅ Deployment successful!!"
