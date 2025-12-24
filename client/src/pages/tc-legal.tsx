@@ -7,7 +7,7 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { MainLayout } from "@/components/layout/main-layout";
+import { Layout } from "@/components/layout/layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,7 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { authenticatedRequest } from "@/lib/api";
+import { authenticatedRequest } from "@/lib/auth";
 import {
   FileSearch,
   AlertTriangle,
@@ -177,7 +177,7 @@ export default function TcLegal() {
       }
       return res.json();
     },
-    onSuccess: (data) => {
+  onSuccess: (data: TcAnalysis) => {
       queryClient.invalidateQueries({ queryKey: ["/api/tc-legal"] });
       queryClient.invalidateQueries({ queryKey: ["/api/tc-legal/stats/summary"] });
       setIsAnalyzeDialogOpen(false);
@@ -229,7 +229,7 @@ export default function TcLegal() {
   };
 
   const toggleRiskFlag = (index: number) => {
-    setExpandedRiskFlags(prev => {
+  setExpandedRiskFlags((prev: Set<number>) => {
       const newSet = new Set(prev);
       if (newSet.has(index)) {
         newSet.delete(index);
@@ -241,7 +241,7 @@ export default function TcLegal() {
   };
 
   return (
-    <MainLayout title="T&C Risk Scanner" subtitle="AI-powered Terms & Conditions legal analysis">
+    <Layout title="T&C Risk Scanner" description="AI-powered Terms & Conditions legal analysis">
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <Card>
@@ -319,7 +319,7 @@ export default function TcLegal() {
                 <Input
                   placeholder="https://example.com/terms"
                   value={analyzeTermsUrl}
-                  onChange={(e) => setAnalyzeTermsUrl(e.target.value)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAnalyzeTermsUrl(e.target.value)}
                 />
               </div>
               <div>
@@ -327,7 +327,7 @@ export default function TcLegal() {
                 <Input
                   placeholder="https://example.com/privacy"
                   value={analyzePrivacyUrl}
-                  onChange={(e) => setAnalyzePrivacyUrl(e.target.value)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAnalyzePrivacyUrl(e.target.value)}
                 />
               </div>
               <Button
@@ -397,7 +397,7 @@ export default function TcLegal() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {analyses?.map((analysis) => (
+                  {analyses?.map((analysis: TcAnalysis) => (
                     <div
                       key={analysis.id}
                       className={`p-3 rounded-lg border cursor-pointer transition-colors ${
@@ -685,6 +685,6 @@ export default function TcLegal() {
           )}
         </div>
       </div>
-    </MainLayout>
+    </Layout>
   );
 }
