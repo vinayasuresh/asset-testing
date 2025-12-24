@@ -1,0 +1,39 @@
+services:
+  app:
+    build: .
+    env_file:
+      - .env
+    ports:
+      # host:container -> map container port 5926 to host 5926 as requested
+      - "5926:5926"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=5926
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5926/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  db:
+    image: postgres:15-alpine
+    env_file:
+      - .env
+    environment:
+      # SECURITY: Database credentials must be set in .env file (never commit secrets)
+      POSTGRES_USER: ${POSTGRES_USER:-asset}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-assetnext}
+    ports:
+      # expose Postgres on host port 5928 as requested -> container 5432
+      - "5928:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    driver: local

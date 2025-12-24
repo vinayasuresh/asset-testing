@@ -1,0 +1,67 @@
+I will recreate the requirements document for the IT Asset Management (IT AM) SaaS application, now specifically tailored for the **MEAN Stack** and incorporating the **LLM-based analysis** functionality. This document can be used as a detailed guide for an AI coding assistant.
+
+---
+
+### 1.0 Executive Summary
+
+This document serves as a detailed guide for building an **IT Asset Management (IT AM) SaaS application** using the **MEAN Stack (MongoDB, Express.js, Angular, Node.js)**. The application will be a multi-tenant platform for managing IT assets, including hardware, software, and peripherals, throughout their entire lifecycle. A key feature is the integration of an external **Large Language Model (LLM) API** to provide intelligent analysis of asset utilization and to generate actionable recommendations for optimization.
+
+---
+
+### 2.0 Functional Requirements
+
+#### 2.1 Asset Lifecycle Management
+The application must support comprehensive management of IT assets from procurement to disposal.
+
+* **Asset Catalog:** A central repository to store detailed information for each asset. The data model should be flexible to accommodate different asset types.
+* **Asset Creation:**
+    * **Manual Entry:** Users must be able to add a new asset record via a form in the Angular frontend.
+    * **Bulk Import:** The system must support importing assets from a CSV file.
+    * **Automated Discovery:** The application needs a component to scan the network (using agent-based or agentless methods) and automatically populate asset data, including hardware specifications, IP/MAC addresses, and installed software.
+* **Asset Updates:** Users should be able to update asset details, location, assigned user, and status.
+* **Lifecycle Status:** The system must track an asset's status through its lifecycle (**In Stock, Deployed, In Repair, Disposed**).
+
+#### 2.2 Software Asset Management (SAM)
+The system must provide tools for tracking and managing software licenses.
+
+* **License Tracking:** The application must track the number of purchased licenses versus the number of installations to ensure **license compliance**.
+* **Reclamation:** The system should identify unused software and allow for license reclamation.
+* **Compliance Dashboard:** A dedicated dashboard will display a compliance overview, flagging any over- or under-licensed software.
+
+#### 2.3 LLM-Powered Recommendations
+The application will use an LLM API to analyze asset data and provide optimization suggestions.
+
+* **Data Collection:** The Node.js backend will collect and store utilization data from assets, including **CPU, RAM, disk usage, and software usage time**.
+* **LLM Integration:** An Express.js service will be created to communicate with the LLM API. This service will prepare and send structured data to the LLM.
+* **Analysis Prompts:** The LLM will be prompted to analyze the data to provide suggestions:
+    * **Underutilization:** Suggest a **downgrade** for assets with consistently low utilization or **release** licenses for unused software.
+    * **Overutilization:** Suggest an **upgrade** for assets with consistently high utilization to prevent performance issues.
+    * **Efficiency Suggestions:** Identify patterns to suggest asset consolidation or re-allocation.
+* **User Interface:** The Angular frontend must have a dedicated "Recommendations" section to display the LLM's suggestions in a clear, actionable format. Users should be able to accept or dismiss these suggestions.
+
+---
+
+### 3.0 Non-Functional Requirements
+
+#### 3.1 Architecture and Technology Stack
+* **Frontend (Angular):** The user interface will be built with Angular to create a responsive, single-page application.
+* **Backend (Express.js & Node.js):** The backend will be a RESTful API built on Express.js and Node.js. It will handle all business logic, data validation, and API integrations.
+* **Database (MongoDB):** MongoDB will be used as the primary database due to its flexibility with schemaless data, which is ideal for varying asset attributes. The database must be configured for multi-tenancy to ensure data isolation.
+
+#### 3.2 Security
+* **Authentication and Authorization:**
+    * Implement **secure user authentication** (sign-up, login, password management).
+    * Use **JSON Web Tokens (JWT)** for session management.
+    * Implement **Role-Based Access Control (RBAC)** to restrict user permissions (e.g., Admin, IT Manager, Read-Only).
+* **Data Encryption:** All data must be **encrypted at rest (in the MongoDB database)** and **in transit (using TLS/SSL)** between the frontend and backend.
+* **Tenant Isolation:** The database schema must be designed to logically separate each client's data to prevent cross-tenant access.
+
+#### 3.3 User Experience (UX)
+* **Intuitive UI:** The Angular UI should be clean, modern, and easy to navigate.
+* **Dashboard:** A customizable dashboard will provide a high-level overview of key metrics such as total assets, compliance status, and upcoming warranty expirations.
+* **Reporting:** The application will generate comprehensive reports on assets, software, and costs, with export options to **CSV and PDF**.
+* **Search and Filters:** Powerful search and filtering capabilities are essential for finding specific assets quickly.
+
+#### 3.4 Integration and Scalability
+* **API:** A well-documented **RESTful API** will be a core feature, allowing for integration with other business systems like ticketing tools or CMDBs.
+* **Scalability:** The architecture must be scalable to handle thousands of assets and a growing number of users. The Node.js and MongoDB combination is well-suited for horizontal scaling.

@@ -1,0 +1,27 @@
+# Node and Replit
+node_modules/
+.upm/
+.cache/
+.replit
+.config/
+.DS_Store
+
+# Build outputs
+dist/
+# Track build folder contents explicitly
+# Ignore compiled output but not source scripts
+# (Adjust these if you want to exclude large binaries later)
+!build/
+!build/**
+*.tar.gz
+
+# Local/test files
+test_assets.csv
+*.png
+*.jpg
+*.jpeg
+*.log
+
+# Env
+.env
+.env.*

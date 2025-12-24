@@ -1,0 +1,113 @@
+name: Deploy AssetNext (App + DB)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🧩 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔑 Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+      - name: 🏗️ Build and push app image
+        run: |
+          USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME=ghcr.io/$USERNAME/assetnext:latest
+          echo "📦 Building image: $IMAGE_NAME"
+          docker build -t $IMAGE_NAME .
+          docker push $IMAGE_NAME
+      - name: 🚀 Deploy to remote server
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 20m
+          script: |
+            set -e
+            USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
+            APP_IMAGE=ghcr.io/$USERNAME/assetnext:latest
+            DB_CONTAINER=assetnext_db
+            APP_CONTAINER=assetnext_app
+            NETWORK_NAME=asset_network
+
+            echo "🧹 Stopping existing app container (if any)..."
+            docker stop $APP_CONTAINER || true
+            docker rm $APP_CONTAINER || true
+
+            echo "🌐 Creating Docker network..."
+            docker network create $NETWORK_NAME || true
+
+            echo "📦 Pulling latest app image..."
+            docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} -p ${{ secrets.GHCR_TOKEN }}
+            docker pull $APP_IMAGE
+
+            echo "🗄️ Creating volume for Postgres..."
+            docker volume create asset_pgdata || true
+
+            echo "🐘 Ensuring Postgres container is running..."
+            if ! docker ps --format '{{.Names}}' | grep -q "^${DB_CONTAINER}$"; then
+              echo "Starting new Postgres container..."
+              docker rm $DB_CONTAINER 2>/dev/null || true
+              docker run -d \
+                --name $DB_CONTAINER \
+                --network $NETWORK_NAME \
+                -e POSTGRES_USER=asset \
+                -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+                -e POSTGRES_DB=assetnext \
+                -p 5928:5432 \
+                -v asset_pgdata:/var/lib/postgresql/data \
+                --restart unless-stopped \
+                postgres:15-alpine
+              echo "⏳ Waiting 15s for DB to initialize..."
+              sleep 15
+            else
+              echo "Postgres container already running"
+              # Ensure it's on the right network
+              docker network connect $NETWORK_NAME $DB_CONTAINER 2>/dev/null || true
+            fi
+
+            echo "🚀 Starting AssetNext app container..."
+            docker run -d \
+              --name $APP_CONTAINER \
+              --network $NETWORK_NAME \
+              -e NODE_ENV=production \
+              -e PORT=5926 \
+              -e HOST=0.0.0.0 \
+              -e SESSION_SECRET=${{ secrets.APP_SESSION_SECRET }} \
+              -e DATABASE_URL="postgresql://asset:${{ secrets.DB_PASSWORD }}@$DB_CONTAINER:5432/assetnext" \
+              -e POSTGRES_PASSWORD=${{ secrets.DB_PASSWORD }} \
+              -e OA_BASE_URL=${{ secrets.OA_BASE_URL }} \
+              -e OA_USERNAME=${{ secrets.OA_USERNAME }} \
+              -e OA_PASSWORD=${{ secrets.OA_PASSWORD }} \
+              -e PUBLIC_URL=${{ secrets.PUBLIC_URL }} \
+              -e PRODUCTION_URL=${{ secrets.PUBLIC_URL }} \
+              -e AGENT_ENROLL_URL=${{ secrets.AGENT_ENROLL_URL }} \
+              -p 5926:5926 \
+              --restart unless-stopped \
+              $APP_IMAGE
+
+            echo "⏳ Waiting for app to start..."
+            sleep 10
+
+            echo "🔍 Checking container status..."
+            if docker ps --format '{{.Names}}' | grep -q "^${APP_CONTAINER}$"; then
+              echo "✅ Container is running!"
+              echo "📋 Container logs (last 20 lines):"
+              docker logs --tail 20 $APP_CONTAINER
+            else
+              echo "❌ Container failed to start!"
+              echo "📋 Container logs:"
+              docker logs $APP_CONTAINER 2>&1 || true
+              exit 1
+            fi
+
+            echo "✅ Deployment successful!!"

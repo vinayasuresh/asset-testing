@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ITAM Agent Installer
+Comment=Install IT Asset Management Agent
+Exec=bash -c 'SCRIPT_PATH="$(dirname "%k")/itam-agent-linux-gui.sh"; if command -v pkexec >/dev/null 2>&1; then pkexec "$SCRIPT_PATH"; elif command -v gksudo >/dev/null 2>&1; then gksudo "$SCRIPT_PATH"; else gnome-terminal -- sudo "$SCRIPT_PATH"; fi'
+Icon=system-software-install
+Terminal=false
+Categories=System;

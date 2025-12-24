@@ -1,0 +1,333 @@
+/**
+ * SSO Revocation Service
+ *
+ * Handles revocation of SSO access from applications via IdP:
+ * - Azure AD app assignment removal
+ * - Google Workspace app access revocation
+ * - Group membership removal
+ * - License reclamation
+ */
+
+import { storage } from '../../storage';
+import { AzureADConnector } from '../idp/azuread-connector';
+import { GoogleWorkspaceConnector } from '../idp/google-connector';
+import { decrypt } from '../encryption';
+
+export interface RevocationResult {
+  success: boolean;
+  message: string;
+  details?: Record<string, any>;
+}
+
+/**
+ * SSO Revocation Service
+ */
+export class SSORevocationService {
+  constructor(private tenantId: string) {}
+
+  /**
+   * Revoke user's SSO access to a specific app
+   */
+  async revokeAccess(userId: string, appId: string): Promise<RevocationResult> {
+    console.log(`[SSO Revocation] Revoking access for user ${userId} to app ${appId}`);
+
+    try {
+      // Get the app details
+      const app = await storage.getSaasApp(appId, this.tenantId);
+      if (!app) {
+        return {
+          success: false,
+          message: 'App not found'
+        };
+      }
+
+      // Get the app's SSO configuration (via identity provider)
+      const userAccess = await storage.getUserAppAccess(userId, appId, this.tenantId);
+      if (!userAccess) {
+        return {
+          success: true,
+          message: 'User does not have access to this app'
+        };
+      }
+
+      // Get identity providers for this tenant
+      const idps = await storage.getIdentityProviders(this.tenantId);
+      let revoked = false;
+      let details: Record<string, any> = {};
+
+      // Try to revoke via each IdP
+      for (const idp of idps) {
+        try {
+          if (idp.type === 'azuread' && idp.status === 'active') {
+            const result = await this.revokeViaAzureAD(userId, app, idp);
+            if (result.success) {
+              revoked = true;
+              details.azuread = result.details;
+            }
+          } else if (idp.type === 'google' && idp.status === 'active') {
+            const result = await this.revokeViaGoogle(userId, app, idp);
+            if (result.success) {
+              revoked = true;
+              details.google = result.details;
+            }
+          }
+        } catch (error: any) {
+          console.warn(`[SSO Revocation] Failed to revoke via ${idp.type}:`, error.message);
+          details[idp.type] = { error: error.message };
+        }
+      }
+
+      // Remove from local database
+      await storage.deleteUserAppAccess(userId, appId, this.tenantId);
+
+      return {
+        success: true,
+        message: revoked
+          ? 'SSO access revoked successfully'
+          : 'Access removed from database (SSO revocation not available)',
+        details
+      };
+    } catch (error: any) {
+      console.error(`[SSO Revocation] Error revoking access:`, error);
+      return {
+        success: false,
+        message: error.message || 'Failed to revoke access',
+        details: { error: error.message }
+      };
+    }
+  }
+
+  /**
+   * Revoke via Azure AD
+   */
+  private async revokeViaAzureAD(
+    userId: string,
+    app: any,
+    idp: any
+  ): Promise<RevocationResult> {
+    // Build config from IdP settings
+    const config = {
+      clientId: idp.clientId || '',
+      clientSecret: idp.clientSecret ? decrypt(idp.clientSecret) : '',
+      tenantDomain: idp.tenantDomain || '',
+      scopes: [],
+      customConfig: {}
+    };
+
+    const connector = new AzureADConnector(config, this.tenantId, idp.id);
+
+    // Get user details
+    const user = await storage.getUser(userId);
+    if (!user || !user.email) {
+      throw new Error('User not found or has no email');
+    }
+
+    try {
+      let grantsRevoked = 0;
+      let assignmentsRemoved = 0;
+
+      // Revoke OAuth permission grants
+      try {
+        const grantResult = await connector.revokeAppAccess(user.email, app.name);
+        grantsRevoked = grantResult.grantsRevoked;
+      } catch (error: any) {
+        console.warn(`[SSO Revocation] Could not revoke OAuth grants:`, error.message);
+      }
+
+      // Remove app role assignments
+      try {
+        const assignmentResult = await connector.removeAppRoleAssignment(user.email, app.name);
+        assignmentsRemoved = assignmentResult.assignmentsRemoved;
+      } catch (error: any) {
+        console.warn(`[SSO Revocation] Could not remove app role assignments:`, error.message);
+      }
+
+      console.log(
+        `[SSO Revocation] Azure AD: Revoked ${grantsRevoked} grants, removed ${assignmentsRemoved} assignments for ${user.email} from ${app.name}`
+      );
+
+      return {
+        success: true,
+        message: 'Azure AD app access revoked',
+        details: {
+          userEmail: user.email,
+          appName: app.name,
+          grantsRevoked,
+          assignmentsRemoved
+        }
+      };
+    } catch (error: any) {
+      throw new Error(`Azure AD revocation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Revoke via Google Workspace
+   */
+  private async revokeViaGoogle(
+    userId: string,
+    app: any,
+    idp: any
+  ): Promise<RevocationResult> {
+    // Build config from IdP settings
+    const config = {
+      clientId: idp.clientId || '',
+      clientSecret: idp.clientSecret ? decrypt(idp.clientSecret) : '',
+      tenantDomain: idp.tenantDomain || '',
+      scopes: [],
+      customConfig: {}
+    };
+
+    const connector = new GoogleWorkspaceConnector(config, this.tenantId, idp.id);
+
+    // Get user details
+    const user = await storage.getUser(userId);
+    if (!user || !user.email) {
+      throw new Error('User not found or has no email');
+    }
+
+    try {
+      let tokensRevoked = 0;
+
+      // Revoke OAuth tokens via Google API
+      try {
+        const result = await connector.revokeAppTokens(user.email, app.name);
+        tokensRevoked = result.tokensRevoked;
+      } catch (error: any) {
+        console.warn(`[SSO Revocation] Could not revoke Google OAuth tokens:`, error.message);
+      }
+
+      console.log(
+        `[SSO Revocation] Google: Revoked ${tokensRevoked} tokens for ${user.email} from ${app.name}`
+      );
+
+      return {
+        success: true,
+        message: 'Google OAuth tokens revoked',
+        details: {
+          userEmail: user.email,
+          appName: app.name,
+          tokensRevoked
+        }
+      };
+    } catch (error: any) {
+      throw new Error(`Google revocation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Remove user from all security groups
+   */
+  async removeFromAllGroups(userId: string): Promise<RevocationResult> {
+    console.log(`[SSO Revocation] Removing user ${userId} from all groups`);
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user || !user.email) {
+        return {
+          success: false,
+          message: 'User not found or has no email'
+        };
+      }
+
+      // Get identity providers
+      const idps = await storage.getIdentityProviders(this.tenantId);
+      const results: Record<string, any> = {};
+
+      // Remove from groups in each IdP
+      for (const idp of idps.filter(i => i.status === 'active')) {
+        try {
+          if (idp.type === 'azuread') {
+            // Remove from Azure AD groups
+            console.log(`[SSO Revocation] Removing from Azure AD groups: ${user.email}`);
+
+            const config = {
+              clientId: idp.clientId || '',
+              clientSecret: idp.clientSecret ? decrypt(idp.clientSecret) : '',
+              tenantDomain: idp.tenantDomain || '',
+              scopes: [],
+              customConfig: {}
+            };
+
+            const connector = new AzureADConnector(config, this.tenantId, idp.id);
+            const groupsRemoved = await connector.removeUserFromAllGroups(user.email);
+
+            results.azuread = { groupsRemoved, message: 'Successfully removed from groups' };
+          } else if (idp.type === 'google') {
+            // Remove from Google groups
+            console.log(`[SSO Revocation] Removing from Google groups: ${user.email}`);
+
+            const config = {
+              clientId: idp.clientId || '',
+              clientSecret: idp.clientSecret ? decrypt(idp.clientSecret) : '',
+              tenantDomain: idp.tenantDomain || '',
+              scopes: [],
+              customConfig: {}
+            };
+
+            const connector = new GoogleWorkspaceConnector(config, this.tenantId, idp.id);
+            const groupsRemoved = await connector.removeUserFromAllGroups(user.email);
+
+            results.google = { groupsRemoved, message: 'Successfully removed from groups' };
+          }
+        } catch (error: any) {
+          console.warn(`[SSO Revocation] Failed to remove from ${idp.type} groups:`, error.message);
+          results[idp.type] = { error: error.message };
+        }
+      }
+
+      return {
+        success: true,
+        message: 'User removed from all security groups',
+        details: results
+      };
+    } catch (error: any) {
+      console.error(`[SSO Revocation] Error removing from groups:`, error);
+      return {
+        success: false,
+        message: error.message || 'Failed to remove from groups'
+      };
+    }
+  }
+
+  /**
+   * Reclaim licenses from user
+   */
+  async reclaimLicenses(userId: string): Promise<RevocationResult> {
+    console.log(`[SSO Revocation] Reclaiming licenses for user ${userId}`);
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return {
+          success: false,
+          message: 'User not found'
+        };
+      }
+
+      // Get user's app access
+      const userAccess = await storage.getUserAppAccessList(userId, this.tenantId);
+      const licensesReclaimed = userAccess.length;
+
+      // Remove all access (licenses will be automatically reclaimed)
+      for (const access of userAccess) {
+        await storage.deleteUserAppAccess(userId, access.appId, this.tenantId);
+      }
+
+      return {
+        success: true,
+        message: `Reclaimed ${licensesReclaimed} licenses`,
+        details: {
+          licensesReclaimed,
+          apps: userAccess.map(a => a.appName)
+        }
+      };
+    } catch (error: any) {
+      console.error(`[SSO Revocation] Error reclaiming licenses:`, error);
+      return {
+        success: false,
+        message: error.message || 'Failed to reclaim licenses'
+      };
+    }
+  }
+}

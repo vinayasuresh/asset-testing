@@ -1,0 +1,3349 @@
+import { sql } from "drizzle-orm";
+import { pgTable, text, varchar, timestamp, integer, boolean, decimal, jsonb, uniqueIndex, index, serial } from "drizzle-orm/pg-core";
+import { createInsertSchema, createSelectSchema } from "drizzle-zod";
+import { z } from "zod";
+
+// Asset Type Enum - shared across frontend and backend
+export const AssetTypeEnum = z.enum(["Hardware", "Software", "Peripherals", "Others"]);
+export type AssetType = z.infer<typeof AssetTypeEnum>;
+
+export const users = pgTable("users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userID: integer("user_id"), // Numeric User ID for human-readable identification (unique constraint will be added after migration)
+  username: text("username").notNull().unique(),
+  email: text("email").notNull().unique(),
+  password: text("password").notNull(),
+  firstName: text("first_name").notNull(),
+  lastName: text("last_name").notNull(),
+  role: text("role").notNull().default("technician"), // super-admin, admin, it-manager, technician
+  avatar: text("avatar"), // URL to profile picture
+  phone: text("phone"),
+  department: text("department"),
+  jobTitle: text("job_title"),
+  manager: text("manager"),
+  lastLoginAt: timestamp("last_login_at"),
+  isActive: boolean("is_active").default(true),
+  mustChangePassword: boolean("must_change_password").default(false),
+  tenantId: varchar("tenant_id").notNull(),
+  invitedBy: varchar("invited_by"), // User who invited this user
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  idxTenant: index("idx_users_tenant").on(t.tenantId),
+  idxTenantEmail: index("idx_users_tenant_email").on(t.tenantId, t.email),
+  idxTenantRole: index("idx_users_tenant_role").on(t.tenantId, t.role),
+  idxTenantActive: index("idx_users_tenant_active").on(t.tenantId, t.isActive),
+}));
+
+export const tenants = pgTable("tenants", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  logo: text("logo"), // Company logo URL
+  website: text("website"),
+  industry: text("industry"),
+  employeeCount: integer("employee_count"),
+  supportEmail: text("support_email"), // Email address for external ticket routing
+  // Settings
+  timezone: text("timezone").default("UTC"),
+  currency: text("currency").default("USD"),
+  dateFormat: text("date_format").default("MM/DD/YYYY"),
+  fiscalYearStart: text("fiscal_year_start").default("01-01"),
+  autoRecommendations: boolean("auto_recommendations").default(true),
+  dataRetentionDays: integer("data_retention_days").default(365),
+  // Security Settings
+  enforceSSO: boolean("enforce_sso").default(false),
+  requireMFA: boolean("require_mfa").default(false),
+  sessionTimeout: integer("session_timeout").default(480), // minutes
+  passwordPolicy: jsonb("password_policy"), // complexity rules
+  // OpenAudit Integration (per-tenant)
+  openauditUrl: text("openaudit_url"), // e.g., http://openaudit.company.com
+  openauditUsername: text("openaudit_username"),
+  openauditPassword: text("openaudit_password"), // Should be encrypted in production
+  openauditOrgId: text("openaudit_org_id"), // OpenAudit organization ID for this tenant
+  openauditSyncEnabled: boolean("openaudit_sync_enabled").default(false),
+  openauditSyncCron: text("openaudit_sync_cron").default("*/5 * * * *"), // Every 5 minutes
+  openauditLastSync: timestamp("openaudit_last_sync"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const assets = pgTable(
+  "assets",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+
+    name: text("name").notNull(),
+    type: text("type").notNull(), // Hardware, Software, Peripherals, Others
+    category: text("category"), // laptop, desktop, server, etc.
+    manufacturer: text("manufacturer"),
+    model: text("model"),
+    serialNumber: text("serial_number"),
+
+    status: text("status").notNull().default("in-stock"), // in-stock, deployed, in-repair, disposed
+    location: text("location"), // Legacy field, will be deprecated
+    country: text("country"),
+    state: text("state"),
+    city: text("city"),
+
+    assignedUserId: varchar("assigned_user_id"),
+    assignedUserName: text("assigned_user_name"),
+    assignedUserEmail: text("assigned_user_email"),
+    assignedUserEmployeeId: text("assigned_user_employee_id"),
+
+    purchaseDate: timestamp("purchase_date"),
+    purchaseCost: decimal("purchase_cost", { precision: 10, scale: 2 }),
+    warrantyExpiry: timestamp("warranty_expiry"),
+    amcExpiry: timestamp("amc_expiry"), // Annual Maintenance Contract expiry
+
+    specifications: jsonb("specifications"), // CPU, RAM, Storage, etc.
+    notes: text("notes"),
+
+    // Software-specific fields
+    softwareName: text("software_name"),
+    version: text("version"),
+    licenseType: text("license_type"), // perpetual, subscription, volume
+    licenseKey: text("license_key"),
+    usedLicenses: integer("used_licenses"),
+    renewalDate: timestamp("renewal_date"),
+
+    // Vendor information
+    vendorName: text("vendor_name"),
+    vendorEmail: text("vendor_email"),
+    vendorPhone: text("vendor_phone"),
+
+    // Company information
+    companyName: text("company_name"),
+    companyGstNumber: text("company_gst_number"),
+    addedViaEnrollment: boolean("added_via_enrollment").notNull().default(false),
+
+    tenantId: varchar("tenant_id").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (t) => ({
+    // ✅ Add these unique indexes so ON CONFLICT works
+    uniqTenantSerial: uniqueIndex("uniq_assets_tenant_serial").on(
+      t.tenantId,
+      t.serialNumber
+    ),
+    uniqTenantName: uniqueIndex("uniq_assets_tenant_name").on(
+      t.tenantId,
+      t.name
+    ),
+    // Performance indexes for common queries
+    idxTenant: index("idx_assets_tenant").on(t.tenantId),
+    idxAssignedUser: index("idx_assets_assigned_user").on(t.assignedUserId),
+    idxTenantStatus: index("idx_assets_tenant_status").on(t.tenantId, t.status),
+    idxTenantType: index("idx_assets_tenant_type").on(t.tenantId, t.type),
+  })
+);
+
+
+export const softwareLicenses = pgTable("software_licenses", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  vendor: text("vendor"),
+  version: text("version"),
+  licenseKey: text("license_key"),
+  licenseType: text("license_type"), // perpetual, subscription, volume
+  totalLicenses: integer("total_licenses").notNull(),
+  usedLicenses: integer("used_licenses").notNull().default(0),
+  costPerLicense: decimal("cost_per_license", { precision: 10, scale: 2 }),
+  renewalDate: timestamp("renewal_date"),
+  notes: text("notes"),
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const assetUtilization = pgTable("asset_utilization", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  assetId: varchar("asset_id").notNull(),
+  cpuUsage: decimal("cpu_usage", { precision: 5, scale: 2 }),
+  ramUsage: decimal("ram_usage", { precision: 5, scale: 2 }),
+  diskUsage: decimal("disk_usage", { precision: 5, scale: 2 }),
+  networkUsage: decimal("network_usage", { precision: 10, scale: 2 }),
+  recordedAt: timestamp("recorded_at").defaultNow(),
+  tenantId: varchar("tenant_id").notNull(),
+});
+
+export const assetSoftwareLinks = pgTable("asset_software_links", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull(),
+  assetId: varchar("asset_id").notNull(),
+  softwareAssetId: varchar("software_asset_id").notNull(),
+  createdBy: varchar("created_by"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  uniqAssetSoftwareLink: uniqueIndex("uniq_asset_software_link").on(table.tenantId, table.assetId, table.softwareAssetId),
+}));
+
+export const recommendations = pgTable("recommendations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  type: text("type").notNull(), // downgrade, upgrade, reallocation, license-optimization
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  potentialSavings: decimal("potential_savings", { precision: 10, scale: 2 }),
+  priority: text("priority").notNull().default("medium"), // low, medium, high
+  status: text("status").notNull().default("pending"), // pending, accepted, dismissed
+  assetIds: jsonb("asset_ids"), // Array of asset IDs affected
+  generatedAt: timestamp("generated_at").defaultNow(),
+  tenantId: varchar("tenant_id").notNull(),
+});
+
+// User Preferences
+export const userPreferences = pgTable("user_preferences", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull(),
+  // Notification Settings
+  emailNotifications: boolean("email_notifications").default(true),
+  pushNotifications: boolean("push_notifications").default(false),
+  aiRecommendationAlerts: boolean("ai_recommendation_alerts").default(true),
+  weeklyReports: boolean("weekly_reports").default(false),
+  assetExpiryAlerts: boolean("asset_expiry_alerts").default(true),
+  // Display Settings
+  theme: text("theme").default("light"), // light, dark, auto
+  language: text("language").default("en"),
+  timezone: text("timezone").default("UTC"),
+  dateFormat: text("date_format").default("MM/DD/YYYY"),
+  dashboardLayout: jsonb("dashboard_layout"), // widget preferences
+  itemsPerPage: integer("items_per_page").default(25),
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Audit Logs for Enterprise Compliance
+export const auditLogs = pgTable("audit_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  action: text("action").notNull(), // CREATE, UPDATE, DELETE, LOGIN, LOGOUT
+  resourceType: text("resource_type").notNull(), // ASSET, LICENSE, USER, SETTING
+  resourceId: varchar("resource_id"),
+  userId: varchar("user_id").notNull(),
+  userEmail: text("user_email").notNull(),
+  userRole: text("user_role").notNull(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  beforeState: jsonb("before_state"),
+  afterState: jsonb("after_state"),
+  description: text("description"),
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const aiResponses = pgTable("ai_responses", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  prompt: text("prompt").notNull(),
+  response: text("response").notNull(),
+  userId: varchar("user_id").notNull(),
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const masterData = pgTable("master_data", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  type: text("type").notNull(), // manufacturer, model, category, location, vendor, company
+  value: text("value").notNull(),
+  description: text("description"),
+  isActive: boolean("is_active").default(true),
+  metadata: jsonb("metadata"), // flexible properties
+  createdBy: varchar("created_by").notNull(),
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Token Blacklist for JWT invalidation on logout
+export const tokenBlacklist = pgTable("token_blacklist", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenHash: text("token_hash").notNull(), // SHA-256 hash of the token (not the token itself)
+  userId: varchar("user_id").notNull(),
+  tenantId: varchar("tenant_id").notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // When the token naturally expires (for cleanup)
+  blacklistedAt: timestamp("blacklisted_at").defaultNow(),
+  reason: text("reason").default("logout"), // logout, password_change, admin_revoke
+}, (t) => ({
+  idxTokenHash: index("idx_token_blacklist_hash").on(t.tokenHash),
+  idxExpiresAt: index("idx_token_blacklist_expires").on(t.expiresAt),
+}));
+
+export type TokenBlacklist = typeof tokenBlacklist.$inferSelect;
+export type InsertTokenBlacklist = typeof tokenBlacklist.$inferInsert;
+
+// Tickets for Service Desk
+export const tickets = pgTable("tickets", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  ticketNumber: text("ticket_number").notNull().unique(), // Auto-generated ticket number
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  category: text("category").notNull(), // hardware, software, network, account, other
+  priority: text("priority").notNull().default("medium"), // low, medium, high, urgent
+  status: text("status").notNull().default("open"), // open, in-progress, resolved, closed, cancelled
+
+  // User relationships
+  requestorId: varchar("requestor_id").notNull(), // Employee who raised the ticket
+  requestorName: text("requestor_name").notNull(),
+  requestorEmail: text("requestor_email").notNull(),
+  assignedToId: varchar("assigned_to_id"), // Technician assigned to ticket
+  assignedToName: text("assigned_to_name"),
+  assignedById: varchar("assigned_by_id"), // Admin who assigned the ticket
+  assignedByName: text("assigned_by_name"),
+
+  // Timestamps
+  assignedAt: timestamp("assigned_at"),
+  resolvedAt: timestamp("resolved_at"),
+  closedAt: timestamp("closed_at"),
+  dueDate: timestamp("due_date"),
+
+  // Additional details
+  resolution: text("resolution"), // Resolution details when ticket is resolved
+  resolutionNotes: text("resolution_notes"), // Internal notes for resolution
+  assetId: varchar("asset_id"), // Related asset (if applicable)
+  assetName: text("asset_name"),
+  attachments: jsonb("attachments"), // File attachments metadata
+  tags: text("tags").array(), // Array of tags for categorization
+
+  // Tenant isolation
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  idxTenant: index("idx_tickets_tenant").on(t.tenantId),
+  idxTenantStatus: index("idx_tickets_tenant_status").on(t.tenantId, t.status),
+  idxRequestor: index("idx_tickets_requestor").on(t.requestorId),
+  idxAssignedTo: index("idx_tickets_assigned_to").on(t.assignedToId),
+  idxTenantCreated: index("idx_tickets_tenant_created").on(t.tenantId, t.createdAt),
+}));
+
+// Ticket Comments for communication trail
+export const ticketComments = pgTable("ticket_comments", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  ticketId: varchar("ticket_id").notNull(),
+  authorId: varchar("author_id").notNull(),
+  authorName: text("author_name").notNull(),
+  authorRole: text("author_role").notNull(),
+  content: text("content").notNull(),
+  isInternal: boolean("is_internal").default(false), // Internal notes vs public comments
+  attachments: jsonb("attachments"), // File attachments metadata
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => ({
+  idxTicket: index("idx_ticket_comments_ticket").on(t.ticketId),
+  idxTenant: index("idx_ticket_comments_tenant").on(t.tenantId),
+}));
+
+// Ticket Activity Log for audit trail
+export const ticketActivities = pgTable("ticket_activities", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  ticketId: varchar("ticket_id").notNull(),
+  activityType: text("activity_type").notNull(), // created, assigned, status_changed, commented, resolved, closed
+  description: text("description").notNull(), // Human-readable description
+  actorId: varchar("actor_id").notNull(),
+  actorName: text("actor_name").notNull(),
+  actorRole: text("actor_role").notNull(),
+  metadata: jsonb("metadata"), // Additional context data
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => ({
+  idxTicket: index("idx_ticket_activities_ticket").on(t.ticketId),
+  idxTenant: index("idx_ticket_activities_tenant").on(t.tenantId),
+}));
+
+// Insert Schemas
+export const insertUserSchema = createInsertSchema(users).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertTenantSchema = createInsertSchema(tenants).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAssetSchema = createInsertSchema(assets, {
+  purchaseDate: z.coerce.date().optional(),
+  warrantyExpiry: z.coerce.date().optional(),
+  renewalDate: z.coerce.date().optional(),
+  country: z.string().optional(),
+  state: z.string().optional(), 
+  city: z.string().optional(),
+}).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  type: AssetTypeEnum, // Enforce Title Case asset types
+  purchaseCost: z.number().nonnegative().optional().or(z.undefined()),
+});
+
+export const insertSoftwareLicenseSchema = createInsertSchema(softwareLicenses).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAssetUtilizationSchema = createInsertSchema(assetUtilization).omit({
+  id: true,
+  recordedAt: true,
+});
+
+export const insertRecommendationSchema = createInsertSchema(recommendations).omit({
+  id: true,
+  generatedAt: true,
+});
+
+export const insertUserPreferencesSchema = createInsertSchema(userPreferences).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertAiResponseSchema = createInsertSchema(aiResponses).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertMasterDataSchema = createInsertSchema(masterData).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertTicketSchema = createInsertSchema(tickets).omit({
+  id: true,
+  ticketNumber: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertTicketCommentSchema = createInsertSchema(ticketComments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertTicketActivitySchema = createInsertSchema(ticketActivities).omit({
+  id: true,
+  createdAt: true,
+});
+
+// User Invitations Table
+export const userInvitations = pgTable("user_invitations", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: text("email").notNull(),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  role: text("role").notNull().default("technician"), // super-admin, admin, it-manager, technician
+  tenantId: varchar("tenant_id").notNull(),
+  invitedBy: varchar("invited_by").notNull(),
+  token: text("token").notNull().unique(), // Invitation token
+  status: text("status").notNull().default("pending"), // pending, accepted, expired
+  expiresAt: timestamp("expires_at").notNull(),
+  acceptedAt: timestamp("accepted_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Tenant Admin Lock - Sentinel table for atomic first admin creation
+export const tenantAdminLock = pgTable("tenant_admin_lock", {
+  tenantId: varchar("tenant_id").primaryKey(), // Unique constraint prevents race conditions
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Authentication schemas
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
+export const registerSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  firstName: z.string().min(1),
+  lastName: z.string().min(1),
+  tenantName: z.string().min(1),
+});
+
+// Types
+export type User = typeof users.$inferSelect;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type Tenant = typeof tenants.$inferSelect;
+export type InsertTenant = z.infer<typeof insertTenantSchema>;
+export type Asset = typeof assets.$inferSelect;
+export type InsertAsset = z.infer<typeof insertAssetSchema>;
+export type SoftwareLicense = typeof softwareLicenses.$inferSelect;
+export type InsertSoftwareLicense = z.infer<typeof insertSoftwareLicenseSchema>;
+export type AssetUtilization = typeof assetUtilization.$inferSelect;
+export type InsertAssetUtilization = z.infer<typeof insertAssetUtilizationSchema>;
+export type AssetSoftwareLink = typeof assetSoftwareLinks.$inferSelect;
+export type InsertAssetSoftwareLink = typeof assetSoftwareLinks.$inferInsert;
+export type Recommendation = typeof recommendations.$inferSelect;
+export type InsertRecommendation = z.infer<typeof insertRecommendationSchema>;
+export type UserPreferences = typeof userPreferences.$inferSelect;
+export type InsertUserPreferences = z.infer<typeof insertUserPreferencesSchema>;
+export type AuditLog = typeof auditLogs.$inferSelect;
+export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
+export type AIResponse = typeof aiResponses.$inferSelect;
+export type InsertAIResponse = z.infer<typeof insertAiResponseSchema>;
+export type MasterData = typeof masterData.$inferSelect;
+export type InsertMasterData = z.infer<typeof insertMasterDataSchema>;
+export type Ticket = typeof tickets.$inferSelect;
+export type InsertTicket = z.infer<typeof insertTicketSchema>;
+export type TicketComment = typeof ticketComments.$inferSelect;
+export type InsertTicketComment = z.infer<typeof insertTicketCommentSchema>;
+export type TicketActivity = typeof ticketActivities.$inferSelect;
+export type InsertTicketActivity = z.infer<typeof insertTicketActivitySchema>;
+export type LoginRequest = z.infer<typeof loginSchema>;
+export type RegisterRequest = z.infer<typeof registerSchema>;
+
+// Additional validation schemas for API endpoints
+export const updateUserProfileSchema = z.object({
+  firstName: z.string().min(1, "First name is required"),
+  lastName: z.string().min(1, "Last name is required"),
+  phone: z.string().optional(),
+  department: z.string().optional(),
+  jobTitle: z.string().optional(),
+  manager: z.string().optional(),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, "Current password is required"),
+  newPassword: z.string().min(8, "Password must be at least 8 characters"),
+  confirmPassword: z.string().min(1, "Please confirm your password"),
+}).refine((data) => data.newPassword === data.confirmPassword, {
+  message: "Passwords don't match",
+  path: ["confirmPassword"],
+});
+
+export const updateUserPreferencesSchema = z.object({
+  emailNotifications: z.boolean(),
+  pushNotifications: z.boolean(),
+  aiRecommendationAlerts: z.boolean(),
+  weeklyReports: z.boolean(),
+  assetExpiryAlerts: z.boolean(),
+  theme: z.enum(["light", "dark", "auto"]),
+  language: z.string(),
+  timezone: z.string(),
+  dateFormat: z.string(),
+  itemsPerPage: z.number().int().min(10).max(100),
+});
+
+export const updateOrgSettingsSchema = z.object({
+  name: z.string().min(1, "Organization name is required"),
+  timezone: z.string(),
+  currency: z.string(),
+  dateFormat: z.string(),
+  autoRecommendations: z.boolean(),
+  dataRetentionDays: z.number().int().min(30).max(2555), // 30 days to 7 years
+});
+
+// User invitation schemas
+export const inviteUserSchema = z.object({
+  email: z.string().email("Valid email address is required"),
+  firstName: z.string().min(1, "First name is required"),
+  lastName: z.string().min(1, "Last name is required"),
+  role: z.enum(["technician", "it-manager", "admin"]), // super-admin excluded from invitations
+});
+
+export const acceptInvitationSchema = z.object({
+  token: z.string().min(1, "Invitation token is required"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+});
+
+export const updateUserRoleSchema = z.object({
+  role: z.enum(["technician", "it-manager", "admin", "super-admin"]),
+});
+
+export const insertUserInvitationSchema = createInsertSchema(userInvitations).omit({
+  id: true,
+  token: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type UserInvitation = typeof userInvitations.$inferSelect;
+export type InsertUserInvitation = z.infer<typeof insertUserInvitationSchema>;
+export type InviteUser = z.infer<typeof inviteUserSchema>;
+export type AcceptInvitation = z.infer<typeof acceptInvitationSchema>;
+export type UpdateUserRole = z.infer<typeof updateUserRoleSchema>;
+export type UpdateUserProfile = z.infer<typeof updateUserProfileSchema>;
+export type UpdateUserPreferences = z.infer<typeof updateUserPreferencesSchema>;
+export type ChangePassword = z.infer<typeof changePasswordSchema>;
+export type UpdateOrgSettings = z.infer<typeof updateOrgSettingsSchema>;
+
+// Ticket validation schemas
+export const createTicketSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200, "Title too long"),
+  description: z.string().min(1, "Description is required").max(2000, "Description too long"),
+  category: z.enum(["hardware", "software", "network", "account", "other"]),
+  priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
+  assetId: z.string().optional(),
+  assetName: z.string().optional(),
+});
+
+export const updateTicketSchema = z.object({
+  title: z.string().min(1, "Title is required").max(200, "Title too long").optional(),
+  description: z.string().min(1, "Description is required").max(2000, "Description too long").optional(),
+  category: z.enum(["hardware", "software", "network", "account", "other"]).optional(),
+  priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+  assetId: z.string().optional(),
+  assetName: z.string().optional(),
+});
+
+export const assignTicketSchema = z.object({
+  assignedToId: z.string().min(1, "Technician ID is required"),
+});
+
+export const addTicketCommentSchema = z.object({
+  content: z.string().min(1, "Comment content is required").max(2000, "Comment too long"),
+  isInternal: z.boolean().default(false),
+});
+
+export const updateTicketStatusSchema = z.object({
+  status: z.enum(["open", "in-progress", "resolved", "closed", "cancelled"]),
+  resolution: z.string().max(2000, "Resolution too long").optional(),
+  resolutionNotes: z.string().max(2000, "Resolution notes too long").optional(),
+});
+
+export type CreateTicket = z.infer<typeof createTicketSchema>;
+export type UpdateTicket = z.infer<typeof updateTicketSchema>;
+export type AssignTicket = z.infer<typeof assignTicketSchema>;
+export type AddTicketComment = z.infer<typeof addTicketCommentSchema>;
+export type UpdateTicketStatus = z.infer<typeof updateTicketStatusSchema>;
+
+// ============================================
+// Network Discovery Tables
+// ============================================
+
+// Sites - Physical or logical locations for network discovery and asset organization
+export const sites = pgTable("sites", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  description: text("description"),
+
+  // Location details
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+  country: text("country"),
+  postalCode: text("postal_code"),
+  timezone: text("timezone"),
+
+  // Network configuration
+  networkRanges: jsonb("network_ranges"), // Array of CIDR ranges for this site
+  primaryGateway: text("primary_gateway"),
+  dnsServers: jsonb("dns_servers"),
+
+  // Site type and hierarchy
+  siteType: text("site_type").default("office"), // office, datacenter, warehouse, remote, branch
+  parentSiteId: varchar("parent_site_id"), // For hierarchical site structure
+
+  // Contact info
+  contactName: text("contact_name"),
+  contactEmail: text("contact_email"),
+  contactPhone: text("contact_phone"),
+
+  // Status
+  isActive: boolean("is_active").default(true),
+
+  // Metadata
+  metadata: jsonb("metadata"),
+
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => ({
+  idxTenant: index("idx_sites_tenant").on(t.tenantId),
+  idxTenantType: index("idx_sites_tenant_type").on(t.tenantId, t.siteType),
+  idxTenantActive: index("idx_sites_tenant_active").on(t.tenantId, t.isActive),
+  idxParent: index("idx_sites_parent").on(t.parentSiteId),
+}));
+
+export const insertSiteSchema = createInsertSchema(sites).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const selectSiteSchema = createSelectSchema(sites);
+export type Site = typeof sites.$inferSelect;
+export type InsertSite = z.infer<typeof insertSiteSchema>;
+
+// Discovery Jobs - tracks network discovery scans
+export const discoveryJobs = pgTable("discovery_jobs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  jobId: text("job_id").notNull().unique(), // Short alphanumeric ID for user reference
+  status: text("status").notNull().default("pending"), // pending, running, completed, failed, expired
+  
+  // Job metadata
+  initiatedBy: varchar("initiated_by").notNull(), // User who started the discovery
+  initiatedByName: text("initiated_by_name").notNull(),
+  osType: text("os_type").notNull(), // windows, macos, linux
+  
+  // Site/network scope
+  siteId: varchar("site_id"), // Optional site assignment
+  siteName: text("site_name"),
+  networkRange: text("network_range"), // CIDR or IP range being scanned
+  
+  // Progress tracking
+  totalHosts: integer("total_hosts").default(0), // Total hosts discovered
+  scannedHosts: integer("scanned_hosts").default(0), // Hosts scanned so far
+  successfulHosts: integer("successful_hosts").default(0), // Hosts with full SNMP data
+  partialHosts: integer("partial_hosts").default(0), // Hosts with partial data (port fingerprint)
+  unreachableHosts: integer("unreachable_hosts").default(0), // Hosts that couldn't be reached
+  progressMessage: text("progress_message"), // Current progress message (e.g., "Scanning 192.168.1.1...")
+  progressPercent: integer("progress_percent").default(0), // Progress percentage (0-100)
+  
+  // Results
+  results: jsonb("results"), // Full scan results (devices discovered)
+  errorLog: text("error_log"), // Error messages if any
+  
+  // Timing
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  expiresAt: timestamp("expires_at").notNull(), // Job expires after 15-30 minutes
+  
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Discovery Tokens - short-lived auth tokens for discovery agents
+export const discoveryTokens = pgTable("discovery_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  token: text("token").notNull().unique(), // JWT or random token
+  jobId: varchar("job_id").notNull(), // References discoveryJobs.id
+  
+  // Scope constraints
+  tenantId: varchar("tenant_id").notNull(),
+  siteId: varchar("site_id"), // Optional site scoping
+  
+  // Token lifecycle
+  isUsed: boolean("is_used").default(false),
+  usedAt: timestamp("used_at"),
+  expiresAt: timestamp("expires_at").notNull(), // 15-30 minute expiry
+  
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Enrollment Tokens - Long-lived tokens for agent enrollment
+export const enrollmentTokens = pgTable("enrollment_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  token: text("token").notNull().unique(), // Secure random token
+  name: text("name").notNull(), // e.g., "Main Office", "Remote Workers", "Data Center"
+  description: text("description"),
+  
+  // Tenant scoping
+  tenantId: varchar("tenant_id").notNull(),
+  
+  // Optional constraints
+  siteId: varchar("site_id"), // Auto-assign enrolled devices to this site
+  siteName: text("site_name"),
+  maxUses: integer("max_uses"), // null = unlimited
+  usageCount: integer("usage_count").default(0),
+  
+  // Token lifecycle
+  isActive: boolean("is_active").default(true),
+  expiresAt: timestamp("expires_at"), // null = never expires
+  
+  // Metadata
+  createdBy: varchar("created_by").notNull(),
+  lastUsedAt: timestamp("last_used_at"),
+  
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Enrollment Sessions - one-time nonce-based sessions for PKG downloads
+export const enrollmentSessions = pgTable("enrollment_sessions", {
+  nonce: text("nonce").primaryKey(), // Cryptographic random nonce
+  
+  // Tenant mapping
+  tenantId: varchar("tenant_id").notNull(),
+  tenantToken: text("tenant_token").notNull(), // Original enrollment token
+  
+  // Session metadata
+  status: text("status").notNull().default("issued"), // issued, consumed
+  userAgent: text("user_agent"),
+  ipHash: text("ip_hash"),
+  
+  // Device info (captured on claim)
+  serial: text("serial"),
+  hostname: text("hostname"),
+  osv: text("osv"),
+  claimedAt: timestamp("claimed_at"),
+  
+  // Timestamps
+  createdAt: timestamp("created_at").defaultNow(),
+  expiresAt: timestamp("expires_at").notNull(),
+});
+
+// Credential Profiles - store SNMP credentials for discovery
+export const credentialProfiles = pgTable("credential_profiles", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(), // e.g., "Default SNMPv3", "Guest Network"
+  description: text("description"),
+  
+  // SNMP version and credentials
+  snmpVersion: text("snmp_version").notNull(), // v2c, v3
+  
+  // SNMPv2c credentials
+  communityString: text("community_string"), // e.g., "public", "itam_public"
+  
+  // SNMPv3 credentials
+  snmpV3Username: text("snmp_v3_username"),
+  snmpV3AuthProtocol: text("snmp_v3_auth_protocol"), // SHA, MD5
+  snmpV3AuthPassword: text("snmp_v3_auth_password"),
+  snmpV3PrivProtocol: text("snmp_v3_priv_protocol"), // AES, DES
+  snmpV3PrivPassword: text("snmp_v3_priv_password"),
+  snmpV3SecurityLevel: text("snmp_v3_security_level"), // noAuthNoPriv, authNoPriv, authPriv
+  
+  // Metadata
+  isDefault: boolean("is_default").default(false), // Use this profile first
+  priority: integer("priority").default(0), // Higher priority tried first
+  isActive: boolean("is_active").default(true),
+  
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Discovered Devices - staging table for devices found during discovery
+export const discoveredDevices = pgTable("discovered_devices", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  jobId: varchar("job_id").notNull(), // References discoveryJobs.id
+  
+  // Device identification
+  ipAddress: text("ip_address").notNull(),
+  macAddress: text("mac_address"),
+  hostname: text("hostname"),
+  
+  // SNMP data
+  sysName: text("sys_name"),
+  sysDescr: text("sys_descr"),
+  sysObjectID: text("sys_object_id"),
+  serialNumber: text("serial_number"),
+  manufacturer: text("manufacturer"),
+  model: text("model"),
+  
+  // Network interfaces (from ifTable)
+  interfaces: jsonb("interfaces"), // Array of interface data
+  
+  // OS detection
+  osName: text("os_name"),
+  osVersion: text("os_version"),
+  
+  // Discovery method and status
+  discoveryMethod: text("discovery_method").notNull(), // snmpv3, snmpv2c, port-fingerprint
+  status: text("status").notNull().default("discovered"), // discovered, partial, failed
+  credentialProfileId: varchar("credential_profile_id"), // Which credential worked
+  
+  // Port fingerprinting data (if SNMP failed)
+  openPorts: jsonb("open_ports"), // Array of open port numbers
+  portFingerprint: text("port_fingerprint"), // Service classification (router, switch, printer, etc.)
+  macOui: text("mac_oui"), // MAC OUI vendor lookup
+  
+  // Deduplication fields
+  isDuplicate: boolean("is_duplicate").default(false), // True if matches existing asset
+  duplicateAssetId: varchar("duplicate_asset_id"), // ID of matching asset
+  duplicateMatchField: text("duplicate_match_field"), // serial, mac, ip
+  
+  // Import status
+  isImported: boolean("is_imported").default(false),
+  importedAt: timestamp("imported_at"),
+  importedAssetId: varchar("imported_asset_id"), // ID in assets table after import
+  
+  // Site assignment
+  siteId: varchar("site_id"),
+  siteName: text("site_name"),
+  
+  // Additional metadata
+  rawData: jsonb("raw_data"), // Full SNMP response or scan data
+  notes: text("notes"),
+  
+  tenantId: varchar("tenant_id").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Insert Schemas for Discovery
+export const insertDiscoveryJobSchema = createInsertSchema(discoveryJobs).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertDiscoveryTokenSchema = createInsertSchema(discoveryTokens).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertEnrollmentTokenSchema = createInsertSchema(enrollmentTokens).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertCredentialProfileSchema = createInsertSchema(credentialProfiles).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertDiscoveredDeviceSchema = createInsertSchema(discoveredDevices).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+// Validation Schemas for Discovery API
+export const createDiscoveryJobSchema = z.object({
+  siteId: z.string().optional(),
+  siteName: z.string().optional(),
+  networkRange: z.string().optional(), // CIDR notation
+});
+
+export const uploadDiscoveryResultsSchema = z.object({
+  devices: z.array(z.object({
+    ipAddress: z.string(),
+    macAddress: z.string().optional(),
+    hostname: z.string().optional(),
+    sysName: z.string().optional(),
+    sysDescr: z.string().optional(),
+    sysObjectID: z.string().optional(),
+    serialNumber: z.string().optional(),
+    manufacturer: z.string().optional(),
+    model: z.string().optional(),
+    osName: z.string().optional(),
+    osVersion: z.string().optional(),
+    interfaces: z.any().optional(),
+    discoveryMethod: z.enum(["snmpv3", "snmpv2c", "port-fingerprint"]),
+    status: z.enum(["discovered", "partial", "failed"]),
+    openPorts: z.array(z.number()).optional(),
+    portFingerprint: z.string().optional(),
+    macOui: z.string().optional(),
+    rawData: z.any().optional(),
+  })),
+});
+
+export const importDiscoveredDevicesSchema = z.object({
+  jobId: z.string(),
+  deviceIds: z.array(z.string()), // Array of discoveredDevices.id to import
+  siteId: z.string().optional(),
+  siteName: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+});
+
+export const createCredentialProfileSchema = z.object({
+  name: z.string().min(1, "Profile name is required"),
+  description: z.string().optional(),
+  snmpVersion: z.enum(["v2c", "v3"]),
+  communityString: z.string().optional(),
+  snmpV3Username: z.string().optional(),
+  snmpV3AuthProtocol: z.enum(["SHA", "MD5"]).optional(),
+  snmpV3AuthPassword: z.string().optional(),
+  snmpV3PrivProtocol: z.enum(["AES", "DES"]).optional(),
+  snmpV3PrivPassword: z.string().optional(),
+  snmpV3SecurityLevel: z.enum(["noAuthNoPriv", "authNoPriv", "authPriv"]).optional(),
+  isDefault: z.boolean().default(false),
+  priority: z.number().default(0),
+});
+
+export const createEnrollmentTokenSchema = z.object({
+  name: z.string().min(1, "Token name is required"),
+  description: z.string().optional(),
+  siteId: z.string().optional(),
+  siteName: z.string().optional(),
+  maxUses: z.number().positive().optional(),
+  expiresAt: z.coerce.date().optional(),
+});
+
+// ============================================
+// Network Monitoring Tables
+// ============================================
+
+// Network Monitor Agents - manages WiFi monitoring agents
+export const networkMonitorAgents = pgTable("network_monitor_agents", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentId: text("agent_id").notNull().unique(),
+  tenantId: varchar("tenant_id").notNull(),
+  apiKey: text("api_key").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  location: text("location"),
+  isActive: boolean("is_active").default(true),
+  lastHeartbeat: timestamp("last_heartbeat"),
+  version: text("version"),
+  capabilities: jsonb("capabilities"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// WiFi Presence - tracks devices detected by WiFi monitoring
+export const wifiPresence = pgTable("wifi_presence", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  tenantId: varchar("tenant_id").notNull(),
+  macAddress: text("mac_address").notNull(),
+  ipAddress: text("ip_address"),
+  hostname: text("hostname"),
+  manufacturer: text("manufacturer"),
+  assetId: varchar("asset_id"), // Link to assets table
+  assetName: text("asset_name"),
+  isAuthorized: boolean("is_authorized").default(false),
+  firstSeen: timestamp("first_seen").defaultNow(),
+  lastSeen: timestamp("last_seen").defaultNow(),
+  isActive: boolean("is_active").default(true),
+  connectionDuration: integer("connection_duration").default(0), // in seconds
+  deviceType: text("device_type"), // phone, laptop, tablet, etc
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Unknown Device Alerts - alerts for unrecognized devices
+export const unknownDeviceAlerts = pgTable("unknown_device_alerts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  tenantId: varchar("tenant_id").notNull(),
+  macAddress: text("mac_address").notNull(),
+  ipAddress: text("ip_address"),
+  hostname: text("hostname"),
+  manufacturer: text("manufacturer"),
+  deviceType: text("device_type"),
+  detectedAt: timestamp("detected_at").defaultNow(),
+  isResolved: boolean("is_resolved").default(false),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: varchar("resolved_by"),
+  resolution: text("resolution"),
+  severity: text("severity").default("medium"), // low, medium, high
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// ============================================================================
+// SaaS Governance Tables (Phase 0)
+// ============================================================================
+
+// SaaS Apps - Central registry of all SaaS applications
+export const saasApps = pgTable(
+  "saas_apps",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Basic information
+    name: text("name").notNull(),
+    vendor: text("vendor"),
+    description: text("description"),
+    category: text("category"),
+
+    // URLs and integration
+    websiteUrl: text("website_url"),
+    logoUrl: text("logo_url"),
+    apiUrl: text("api_url"),
+
+    // Governance
+    approvalStatus: text("approval_status").notNull().default("pending"),
+    riskScore: integer("risk_score").default(0),
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+
+    // Usage tracking
+    userCount: integer("user_count").default(0),
+    activeUserCount: integer("active_user_count").default(0),
+    lastUsedAt: timestamp("last_used_at"),
+
+    // Ownership
+    owner: text("owner"),
+    ownerId: varchar("owner_id"),
+    primaryContactEmail: text("primary_contact_email"),
+
+    // Discovery metadata
+    discoveryMethod: text("discovery_method"),
+    discoveryDate: timestamp("discovery_date"),
+    discoveredByUserId: varchar("discovered_by_user_id"),
+
+    // Additional metadata
+    tags: jsonb("tags").$type<string[]>(),
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+    notes: text("notes"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    uniqueTenantName: uniqueIndex("uniq_saas_apps_tenant_name").on(table.tenantId, table.name),
+    idxTenantStatus: index("idx_saas_apps_tenant_status").on(table.tenantId, table.approvalStatus),
+    idxTenantCategory: index("idx_saas_apps_tenant_category").on(table.tenantId, table.category),
+    idxRiskScore: index("idx_saas_apps_risk_score").on(table.tenantId, table.riskScore),
+  })
+);
+
+// SaaS Contracts - Contract & subscription management
+export const saasContracts = pgTable(
+  "saas_contracts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    appId: varchar("app_id").notNull(),
+
+    // Contract details
+    contractNumber: text("contract_number"),
+    vendor: text("vendor").notNull(),
+
+    // Financial
+    annualValue: decimal("annual_value", { precision: 12, scale: 2 }),
+    currency: text("currency").notNull().default("USD"),
+    billingCycle: text("billing_cycle"),
+    paymentTerms: text("payment_terms"),
+
+    // Dates
+    startDate: timestamp("start_date"),
+    endDate: timestamp("end_date"),
+    renewalDate: timestamp("renewal_date"),
+    noticePeriodDays: integer("notice_period_days"),
+
+    // Auto-renewal
+    autoRenew: boolean("auto_renew").default(false),
+    renewalAlerted: boolean("renewal_alerted").default(false),
+
+    // Contract terms
+    terms: text("terms"),
+    terminationClause: text("termination_clause"),
+
+    // License details
+    licenseType: text("license_type"),
+    totalLicenses: integer("total_licenses"),
+    usedLicenses: integer("used_licenses").default(0),
+
+    // Document management
+    contractFileUrl: text("contract_file_url"),
+    signedBy: text("signed_by"),
+    signedDate: timestamp("signed_date"),
+
+    // Ownership
+    owner: text("owner"),
+    ownerId: varchar("owner_id"),
+
+    // Status
+    status: text("status").notNull().default("active"),
+
+    // Additional metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+    notes: text("notes"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantApp: index("idx_saas_contracts_tenant_app").on(table.tenantId, table.appId),
+    idxTenantStatus: index("idx_saas_contracts_tenant_status").on(table.tenantId, table.status),
+    idxRenewalDate: index("idx_saas_contracts_renewal_date").on(table.renewalDate),
+    idxTenantRenewalDate: index("idx_saas_contracts_tenant_renewal").on(table.tenantId, table.renewalDate),
+  })
+);
+
+// ============================================================================
+// T&C LEGAL ANALYSIS - Terms & Conditions Risk Scanner
+// Analyzes SaaS app terms, privacy policies, and EULAs for legal risks
+// ============================================================================
+
+export const tcLegalAnalysis = pgTable(
+  "tc_legal_analysis",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    appId: varchar("app_id").notNull(),
+
+    // Source URLs analyzed
+    termsUrl: text("terms_url"),
+    privacyPolicyUrl: text("privacy_policy_url"),
+    eulaUrl: text("eula_url"),
+    dpaUrl: text("dpa_url"), // Data Processing Agreement
+
+    // Analysis metadata
+    analysisDate: timestamp("analysis_date").defaultNow(),
+    analysisVersion: text("analysis_version").default("1.0"),
+    documentHash: text("document_hash"), // To detect changes
+    aiModel: text("ai_model").default("gpt-4o"),
+
+    // Overall Risk Assessment
+    overallRiskScore: integer("overall_risk_score").default(0), // 0-100
+    riskLevel: text("risk_level").default("unknown"), // low, medium, high, critical
+
+    // Data Handling Clauses
+    dataResidency: text("data_residency"), // Where data is stored
+    dataResidencyCompliant: boolean("data_residency_compliant"), // India localization check
+    dataOwnership: text("data_ownership"), // Who owns the data
+    dataRetention: text("data_retention"), // Retention period
+    dataDeletion: text("data_deletion"), // Deletion rights
+    dataPortability: boolean("data_portability"), // Can export data?
+
+    // Third-Party & Subprocessors
+    subprocessorsAllowed: boolean("subprocessors_allowed"),
+    subprocessorsList: jsonb("subprocessors_list").$type<string[]>(),
+    thirdPartySharing: text("third_party_sharing"),
+
+    // Security & Compliance Claims
+    securityCertifications: jsonb("security_certifications").$type<string[]>(), // SOC2, ISO, etc.
+    encryptionClaims: text("encryption_claims"),
+    breachNotificationDays: integer("breach_notification_days"),
+
+    // Legal Terms
+    governingLaw: text("governing_law"), // Jurisdiction
+    disputeResolution: text("dispute_resolution"), // Arbitration/Litigation
+    liabilityLimitation: text("liability_limitation"),
+    indemnification: text("indemnification"),
+
+    // Termination & Exit
+    terminationRights: text("termination_rights"),
+    terminationNoticeDays: integer("termination_notice_days"),
+    dataExportOnTermination: boolean("data_export_on_termination"),
+
+    // IP & Confidentiality
+    ipOwnership: text("ip_ownership"), // Who owns generated content
+    confidentialityTerms: text("confidentiality_terms"),
+
+    // SLA Terms (if found)
+    uptimeGuarantee: text("uptime_guarantee"),
+    slaPenalties: text("sla_penalties"),
+    supportTerms: text("support_terms"),
+
+    // Auto-Renewal & Pricing
+    autoRenewalClause: boolean("auto_renewal_clause"),
+    priceChangeNotice: text("price_change_notice"),
+
+    // AI/ML Specific (important for modern SaaS)
+    aiDataUsage: text("ai_data_usage"), // Can they use your data for AI training?
+    aiOptOut: boolean("ai_opt_out"), // Can you opt out?
+
+    // Regulatory Compliance Flags
+    gdprCompliant: boolean("gdpr_compliant"),
+    dpdpCompliant: boolean("dpdp_compliant"),
+    hipaaCompliant: boolean("hipaa_compliant"),
+    soc2Compliant: boolean("soc2_compliant"),
+
+    // Risk Flags (detailed findings)
+    riskFlags: jsonb("risk_flags").$type<{
+      category: string;
+      severity: 'low' | 'medium' | 'high' | 'critical';
+      clause: string;
+      concern: string;
+      recommendation: string;
+    }[]>(),
+
+    // Compliance Mapping
+    regulatoryMapping: jsonb("regulatory_mapping").$type<{
+      framework: string; // SEBI, RBI, IRDAI, DPDP
+      controlId: string;
+      status: 'compliant' | 'non_compliant' | 'partial' | 'unknown';
+      notes: string;
+    }[]>(),
+
+    // Key Clauses Summary
+    keyClauses: jsonb("key_clauses").$type<{
+      title: string;
+      summary: string;
+      riskLevel: string;
+    }[]>(),
+
+    // AI Analysis Summary
+    executiveSummary: text("executive_summary"),
+    recommendations: jsonb("recommendations").$type<string[]>(),
+
+    // Analysis confidence
+    confidenceScore: integer("confidence_score").default(0), // 0-100
+    manualReviewRequired: boolean("manual_review_required").default(false),
+
+    // Review workflow
+    reviewedBy: varchar("reviewed_by"),
+    reviewedAt: timestamp("reviewed_at"),
+    reviewNotes: text("review_notes"),
+    approvalStatus: text("approval_status").default("pending"), // pending, approved, rejected, needs_review
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantApp: index("idx_tc_legal_tenant_app").on(table.tenantId, table.appId),
+    idxTenantRisk: index("idx_tc_legal_tenant_risk").on(table.tenantId, table.riskLevel),
+    idxTenantApproval: index("idx_tc_legal_tenant_approval").on(table.tenantId, table.approvalStatus),
+  })
+);
+
+// User App Access - User–App relationship graph
+export const userAppAccess = pgTable(
+  "user_app_access",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    appId: varchar("app_id").notNull(),
+
+    // Access details
+    accessGrantedDate: timestamp("access_granted_date").defaultNow(),
+    lastAccessDate: timestamp("last_access_date"),
+    accessRevokedDate: timestamp("access_revoked_date"),
+
+    // Permissions
+    permissions: jsonb("permissions").$type<string[]>(),
+    roles: jsonb("roles").$type<string[]>(),
+
+    // OAuth context
+    hasOAuthToken: boolean("has_oauth_token").default(false),
+    oauthScopes: jsonb("oauth_scopes").$type<string[]>(),
+
+    // Assignment tracking
+    assignedBy: varchar("assigned_by"),
+    assignmentMethod: text("assignment_method"),
+
+    // Status
+    status: text("status").notNull().default("active"),
+
+    // Usage tracking
+    loginCount: integer("login_count").default(0),
+    lastLoginAt: timestamp("last_login_at"),
+
+    // Access review fields (added for access review campaigns)
+    accessType: text("access_type"),
+    businessJustification: text("business_justification"),
+    lastReviewedAt: timestamp("last_reviewed_at"),
+    lastReviewedBy: varchar("last_reviewed_by"),
+    nextReviewDate: timestamp("next_review_date"),
+
+    // Metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+    notes: text("notes"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    uniqueTenantUserApp: uniqueIndex("uniq_user_app_access_tenant_user_app").on(
+      table.tenantId,
+      table.userId,
+      table.appId
+    ),
+    idxTenantUser: index("idx_user_app_access_tenant_user").on(table.tenantId, table.userId),
+    idxTenantApp: index("idx_user_app_access_tenant_app").on(table.tenantId, table.appId),
+    idxStatus: index("idx_user_app_access_status").on(table.tenantId, table.status),
+  })
+);
+
+// OAuth Tokens - OAuth token tracking for risk analysis
+export const oauthTokens = pgTable(
+  "oauth_tokens",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    appId: varchar("app_id").notNull(),
+
+    // OAuth details
+    tokenHash: text("token_hash"),
+    scopes: jsonb("scopes").$type<string[]>().notNull(),
+    grantType: text("grant_type"),
+
+    // Token lifecycle
+    grantedAt: timestamp("granted_at").notNull().defaultNow(),
+    expiresAt: timestamp("expires_at"),
+    revokedAt: timestamp("revoked_at"),
+    lastUsedAt: timestamp("last_used_at"),
+
+    // Risk assessment
+    riskLevel: text("risk_level").default("low"),
+    riskReasons: jsonb("risk_reasons").$type<string[]>(),
+
+    // Revocation
+    status: text("status").notNull().default("active"),
+    revokedBy: varchar("revoked_by"),
+    revocationReason: text("revocation_reason"),
+
+    // IdP metadata
+    idpTokenId: text("idp_token_id"),
+    idpMetadata: jsonb("idp_metadata").$type<Record<string, any>>(),
+
+    // Metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantUserApp: index("idx_oauth_tokens_tenant_user_app").on(table.tenantId, table.userId, table.appId),
+    idxTenantStatus: index("idx_oauth_tokens_tenant_status").on(table.tenantId, table.status),
+    idxRiskLevel: index("idx_oauth_tokens_risk_level").on(table.tenantId, table.riskLevel),
+    idxExpiresAt: index("idx_oauth_tokens_expires_at").on(table.expiresAt),
+  })
+);
+
+// Identity Providers - IdP configuration
+export const identityProviders = pgTable(
+  "identity_providers",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Provider details
+    name: text("name").notNull(),
+    type: text("type").notNull(),
+
+    // Configuration (clientSecret will be encrypted at application layer)
+    clientId: text("client_id"),
+    clientSecret: text("client_secret"),
+    tenantDomain: text("tenant_domain"),
+
+    // OAuth endpoints
+    authorizationUrl: text("authorization_url"),
+    tokenUrl: text("token_url"),
+    userInfoUrl: text("user_info_url"),
+
+    // Scopes and permissions
+    scopes: jsonb("scopes").$type<string[]>(),
+
+    // Sync configuration
+    syncEnabled: boolean("sync_enabled").default(false),
+    syncInterval: integer("sync_interval").default(3600),
+    lastSyncAt: timestamp("last_sync_at"),
+    nextSyncAt: timestamp("next_sync_at"),
+    syncStatus: text("sync_status").default("idle"),
+    syncError: text("sync_error"),
+
+    // Statistics
+    totalUsers: integer("total_users").default(0),
+    totalApps: integer("total_apps").default(0),
+
+    // Status
+    status: text("status").notNull().default("active"),
+
+    // Configuration metadata
+    config: jsonb("config").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    uniqueTenantType: uniqueIndex("uniq_identity_providers_tenant_type").on(table.tenantId, table.type),
+    idxTenantStatus: index("idx_identity_providers_tenant_status").on(table.tenantId, table.status),
+    idxNextSync: index("idx_identity_providers_next_sync").on(table.nextSyncAt),
+  })
+);
+
+// SaaS Invoices - Invoice tracking
+export const saasInvoices = pgTable(
+  "saas_invoices",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    appId: varchar("app_id"),
+    contractId: varchar("contract_id"),
+
+    // Invoice details
+    invoiceNumber: text("invoice_number"),
+    vendor: text("vendor").notNull(),
+
+    // Financial
+    amount: decimal("amount", { precision: 12, scale: 2 }).notNull(),
+    currency: text("currency").notNull().default("USD"),
+    taxAmount: decimal("tax_amount", { precision: 12, scale: 2 }),
+    totalAmount: decimal("total_amount", { precision: 12, scale: 2 }),
+
+    // Dates
+    invoiceDate: timestamp("invoice_date").notNull(),
+    dueDate: timestamp("due_date"),
+    paidDate: timestamp("paid_date"),
+
+    // Billing period
+    periodStart: timestamp("period_start"),
+    periodEnd: timestamp("period_end"),
+
+    // Status
+    status: text("status").notNull().default("pending"),
+
+    // Payment
+    paymentMethod: text("payment_method"),
+    transactionId: text("transaction_id"),
+
+    // Document
+    invoiceFileUrl: text("invoice_file_url"),
+
+    // External system
+    externalInvoiceId: text("external_invoice_id"),
+
+    // Categorization
+    category: text("category"),
+    department: text("department"),
+    costCenter: text("cost_center"),
+
+    // Metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+    notes: text("notes"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantApp: index("idx_saas_invoices_tenant_app").on(table.tenantId, table.appId),
+    idxTenantStatus: index("idx_saas_invoices_tenant_status").on(table.tenantId, table.status),
+    idxInvoiceDate: index("idx_saas_invoices_invoice_date").on(table.tenantId, table.invoiceDate),
+    idxDueDate: index("idx_saas_invoices_due_date").on(table.dueDate),
+  })
+);
+
+// Governance Policies - Automation policy rules
+export const governancePolicies = pgTable(
+  "governance_policies",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Policy details
+    name: text("name").notNull(),
+    description: text("description"),
+    policyType: text("policy_type").notNull(),
+
+    // Trigger configuration
+    trigger: jsonb("trigger").$type<{
+      event: string;
+      conditions: Record<string, any>;
+    }>().notNull(),
+
+    // Actions to take
+    actions: jsonb("actions").$type<Array<{
+      type: string;
+      config: Record<string, any>;
+    }>>().notNull(),
+
+    // Execution
+    enabled: boolean("enabled").default(true),
+    priority: integer("priority").default(0),
+
+    // Statistics
+    executionCount: integer("execution_count").default(0),
+    lastExecutedAt: timestamp("last_executed_at"),
+
+    // Owner
+    createdBy: varchar("created_by"),
+
+    // Metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantType: index("idx_governance_policies_tenant_type").on(table.tenantId, table.policyType),
+    idxTenantEnabled: index("idx_governance_policies_tenant_enabled").on(table.tenantId, table.enabled),
+  })
+);
+
+// Browser Extension Discoveries - Shadow IT detection from browser extensions
+export const browserExtensionDiscoveries = pgTable(
+  "browser_extension_discoveries",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Discovery source
+    userId: varchar("user_id"),
+    userEmail: text("user_email"),
+    deviceId: varchar("device_id"),
+    extensionVersion: text("extension_version"),
+    browserType: text("browser_type"),
+
+    // Discovered app details
+    appName: text("app_name").notNull(),
+    appDomain: text("app_domain").notNull(),
+    appUrl: text("app_url"),
+    faviconUrl: text("favicon_url"),
+
+    // Usage tracking
+    visitCount: integer("visit_count").default(1),
+    firstSeenAt: timestamp("first_seen_at").defaultNow(),
+    lastSeenAt: timestamp("last_seen_at").defaultNow(),
+    timeSpentSeconds: integer("time_spent_seconds").default(0),
+
+    // Classification
+    category: text("category"),
+    isSaasApp: boolean("is_saas_app").default(true),
+    confidenceScore: decimal("confidence_score", { precision: 3, scale: 2 }).default("0.5"),
+
+    // Processing status
+    processed: boolean("processed").default(false),
+    processedAt: timestamp("processed_at"),
+    linkedAppId: varchar("linked_app_id"),
+
+    // Metadata
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    uniqueTenantUserApp: uniqueIndex("unique_tenant_user_app").on(table.tenantId, table.userId, table.appDomain),
+    idxTenantProcessed: index("idx_browser_ext_tenant_processed").on(table.tenantId, table.processed),
+    idxTenantUser: index("idx_browser_ext_tenant_user").on(table.tenantId, table.userId),
+  })
+);
+
+// Email Discovery Events - Shadow IT detection from email parsing
+export const emailDiscoveryEvents = pgTable(
+  "email_discovery_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Source details
+    userId: varchar("user_id"),
+    userEmail: text("user_email").notNull(),
+    emailMessageId: text("email_message_id"),
+
+    // Email metadata
+    senderEmail: text("sender_email").notNull(),
+    senderDomain: text("sender_domain").notNull(),
+    emailSubject: text("email_subject"),
+    emailDate: timestamp("email_date"),
+
+    // Discovery type
+    discoveryType: text("discovery_type").notNull(),
+
+    // Extracted app info
+    appName: text("app_name"),
+    appDomain: text("app_domain"),
+    vendorName: text("vendor_name"),
+
+    // Indicators
+    isSignupEmail: boolean("is_signup_email").default(false),
+    isInvoiceEmail: boolean("is_invoice_email").default(false),
+    isWelcomeEmail: boolean("is_welcome_email").default(false),
+    isNotificationEmail: boolean("is_notification_email").default(false),
+
+    // Financial extraction (if invoice)
+    extractedAmount: decimal("extracted_amount", { precision: 12, scale: 2 }),
+    extractedCurrency: text("extracted_currency"),
+    extractedInvoiceNumber: text("extracted_invoice_number"),
+
+    // Processing
+    processed: boolean("processed").default(false),
+    processedAt: timestamp("processed_at"),
+    linkedAppId: varchar("linked_app_id"),
+    confidenceScore: decimal("confidence_score", { precision: 3, scale: 2 }).default("0.5"),
+
+    // Metadata
+    extractedData: jsonb("extracted_data").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantUser: index("idx_email_discovery_tenant_user").on(table.tenantId, table.userEmail),
+    idxTenantProcessed: index("idx_email_discovery_tenant_processed").on(table.tenantId, table.processed),
+    idxSenderDomain: index("idx_email_discovery_sender_domain").on(table.senderDomain),
+  })
+);
+
+// ============================================
+// SaaS Governance Validation Schemas (Phase 0)
+// ============================================
+
+export const insertSaasAppSchema = createInsertSchema(saasApps).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  approvalStatus: z.enum(["pending", "approved", "denied"]).default("pending"),
+  riskScore: z.number().min(0).max(100).default(0),
+  discoveryMethod: z.enum(["idp", "email", "manual", "browser", "network"]).optional(),
+});
+
+export const insertSaasContractSchema = createInsertSchema(saasContracts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  billingCycle: z.enum(["monthly", "quarterly", "annual", "usage-based"]).optional(),
+  licenseType: z.enum(["per-user", "per-device", "unlimited", "consumption-based"]).optional(),
+  status: z.enum(["active", "expired", "cancelled", "pending"]).default("active"),
+  currency: z.string().length(3).default("USD"),
+});
+
+// T&C Legal Analysis Schema
+export const insertTcLegalAnalysisSchema = createInsertSchema(tcLegalAnalysis).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  riskLevel: z.enum(["unknown", "low", "medium", "high", "critical"]).default("unknown"),
+  approvalStatus: z.enum(["pending", "approved", "rejected", "needs_review"]).default("pending"),
+  overallRiskScore: z.number().min(0).max(100).default(0),
+  confidenceScore: z.number().min(0).max(100).default(0),
+});
+
+export const insertUserAppAccessSchema = createInsertSchema(userAppAccess).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  status: z.enum(["active", "revoked", "suspended"]).default("active"),
+  assignmentMethod: z.enum(["manual", "sso", "oauth", "discovered"]).optional(),
+});
+
+export const insertOauthTokenSchema = createInsertSchema(oauthTokens).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  status: z.enum(["active", "expired", "revoked"]).default("active"),
+  riskLevel: z.enum(["low", "medium", "high", "critical"]).default("low"),
+  scopes: z.array(z.string()).min(1),
+});
+
+export const insertIdentityProviderSchema = createInsertSchema(identityProviders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  type: z.enum(["azuread", "okta", "google", "jumpcloud"]),
+  status: z.enum(["active", "disabled", "error"]).default("active"),
+  syncStatus: z.enum(["idle", "syncing", "error"]).default("idle"),
+});
+
+export const insertSaasInvoiceSchema = createInsertSchema(saasInvoices).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  status: z.enum(["pending", "paid", "overdue", "cancelled"]).default("pending"),
+  paymentMethod: z.enum(["card", "bank_transfer", "check", "other"]).optional(),
+  currency: z.string().length(3).default("USD"),
+});
+
+export const insertGovernancePolicySchema = createInsertSchema(governancePolicies).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  policyType: z.enum([
+    "approval",
+    "license_reclaim",
+    "risk_blocking",
+    "renewal_alert",
+    "offboarding"
+  ]),
+});
+
+export const insertBrowserExtensionDiscoverySchema = createInsertSchema(browserExtensionDiscoveries).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  browserType: z.enum(["chrome", "firefox", "edge", "safari"]).optional(),
+  confidenceScore: z.number().min(0).max(1).default(0.5),
+});
+
+export const insertEmailDiscoveryEventSchema = createInsertSchema(emailDiscoveryEvents).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+}).extend({
+  discoveryType: z.enum(["signup", "invoice", "welcome", "notification", "general"]),
+  confidenceScore: z.number().min(0).max(1).default(0.5),
+});
+
+// Types
+export type DiscoveryJob = typeof discoveryJobs.$inferSelect;
+export type InsertDiscoveryJob = z.infer<typeof insertDiscoveryJobSchema>;
+export type DiscoveryToken = typeof discoveryTokens.$inferSelect;
+export type InsertDiscoveryToken = z.infer<typeof insertDiscoveryTokenSchema>;
+export type EnrollmentToken = typeof enrollmentTokens.$inferSelect;
+export type InsertEnrollmentToken = z.infer<typeof insertEnrollmentTokenSchema>;
+export type CreateEnrollmentToken = z.infer<typeof createEnrollmentTokenSchema>;
+export type CredentialProfile = typeof credentialProfiles.$inferSelect;
+export type InsertCredentialProfile = z.infer<typeof insertCredentialProfileSchema>;
+export type DiscoveredDevice = typeof discoveredDevices.$inferSelect;
+export type InsertDiscoveredDevice = z.infer<typeof insertDiscoveredDeviceSchema>;
+export type CreateDiscoveryJob = z.infer<typeof createDiscoveryJobSchema>;
+export type UploadDiscoveryResults = z.infer<typeof uploadDiscoveryResultsSchema>;
+export type ImportDiscoveredDevices = z.infer<typeof importDiscoveredDevicesSchema>;
+export type CreateCredentialProfile = z.infer<typeof createCredentialProfileSchema>;
+
+// SaaS Governance Types
+export type SaasApp = typeof saasApps.$inferSelect;
+export type InsertSaasApp = z.infer<typeof insertSaasAppSchema>;
+export type SaasContract = typeof saasContracts.$inferSelect;
+export type InsertSaasContract = z.infer<typeof insertSaasContractSchema>;
+export type TcLegalAnalysis = typeof tcLegalAnalysis.$inferSelect;
+export type InsertTcLegalAnalysis = z.infer<typeof insertTcLegalAnalysisSchema>;
+export type UserAppAccess = typeof userAppAccess.$inferSelect;
+export type InsertUserAppAccess = z.infer<typeof insertUserAppAccessSchema>;
+export type OauthToken = typeof oauthTokens.$inferSelect;
+export type InsertOauthToken = z.infer<typeof insertOauthTokenSchema>;
+export type IdentityProvider = typeof identityProviders.$inferSelect;
+export type InsertIdentityProvider = z.infer<typeof insertIdentityProviderSchema>;
+export type SaasInvoice = typeof saasInvoices.$inferSelect;
+export type InsertSaasInvoice = z.infer<typeof insertSaasInvoiceSchema>;
+export type GovernancePolicy = typeof governancePolicies.$inferSelect;
+export type InsertGovernancePolicy = z.infer<typeof insertGovernancePolicySchema>;
+export type BrowserExtensionDiscovery = typeof browserExtensionDiscoveries.$inferSelect;
+export type InsertBrowserExtensionDiscovery = z.infer<typeof insertBrowserExtensionDiscoverySchema>;
+export type EmailDiscoveryEvent = typeof emailDiscoveryEvents.$inferSelect;
+export type InsertEmailDiscoveryEvent = z.infer<typeof insertEmailDiscoveryEventSchema>;
+
+// ========================================
+// Phase 3: Offboarding Automation
+// ========================================
+
+// Offboarding Playbooks Table
+export const offboardingPlaybooks = pgTable(
+  "offboarding_playbooks",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    type: text("type").notNull(), // 'standard', 'contractor', 'transfer', 'role_change'
+    description: text("description"),
+    isDefault: boolean("is_default").default(false),
+    steps: jsonb("steps").$type<Array<{
+      type: string;
+      priority: number;
+      enabled: boolean;
+      description: string;
+    }>>().notNull(),
+    createdBy: varchar("created_by").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_offboarding_playbooks_tenant").on(table.tenantId),
+    idxType: index("idx_offboarding_playbooks_type").on(table.type),
+  })
+);
+
+// Offboarding Requests Table
+export const offboardingRequests = pgTable(
+  "offboarding_requests",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    playbookId: varchar("playbook_id"),
+    status: text("status").notNull().default('pending'), // 'pending', 'in_progress', 'completed', 'failed', 'partial', 'cancelled'
+    initiatedBy: varchar("initiated_by").notNull(),
+    initiatedAt: timestamp("initiated_at").defaultNow(),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    totalTasks: integer("total_tasks").default(0),
+    completedTasks: integer("completed_tasks").default(0),
+    failedTasks: integer("failed_tasks").default(0),
+    reason: text("reason"),
+    transferToUserId: varchar("transfer_to_user_id"),
+    notes: text("notes"),
+    auditReportUrl: text("audit_report_url"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_offboarding_requests_tenant").on(table.tenantId),
+    idxUser: index("idx_offboarding_requests_user").on(table.userId),
+    idxStatus: index("idx_offboarding_requests_status").on(table.status),
+    idxInitiatedAt: index("idx_offboarding_requests_initiated_at").on(table.initiatedAt),
+  })
+);
+
+// Offboarding Tasks Table
+export const offboardingTasks = pgTable(
+  "offboarding_tasks",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    requestId: varchar("request_id").notNull(),
+    taskType: text("task_type").notNull(), // 'revoke_sso', 'revoke_oauth', 'transfer_ownership', etc.
+    appId: varchar("app_id"),
+    appName: text("app_name"),
+    status: text("status").notNull().default('pending'), // 'pending', 'in_progress', 'completed', 'failed', 'skipped'
+    priority: integer("priority").default(0),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    result: jsonb("result").$type<Record<string, any>>(),
+    errorMessage: text("error_message"),
+    retryCount: integer("retry_count").default(0),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxRequest: index("idx_offboarding_tasks_request").on(table.requestId),
+    idxStatus: index("idx_offboarding_tasks_status").on(table.status),
+    idxType: index("idx_offboarding_tasks_type").on(table.taskType),
+  })
+);
+
+// HR Integrations Table
+export const hrIntegrations = pgTable(
+  "hr_integrations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    provider: text("provider").notNull(), // 'bamboohr', 'keka', 'darwinbox'
+    name: text("name").notNull(),
+    config: jsonb("config").$type<Record<string, any>>().notNull(),
+    webhookSecret: text("webhook_secret"),
+    status: text("status").notNull().default('active'), // 'active', 'inactive', 'error'
+    syncEnabled: boolean("sync_enabled").default(true),
+    autoTriggerOffboarding: boolean("auto_trigger_offboarding").default(true),
+    defaultPlaybookId: varchar("default_playbook_id"),
+    lastSyncAt: timestamp("last_sync_at"),
+    syncError: text("sync_error"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_hr_integrations_tenant").on(table.tenantId),
+    idxProvider: index("idx_hr_integrations_provider").on(table.provider),
+  })
+);
+
+// Network Monitoring Tables - WiFi device tracking and alerts
+export const wifiDevices = pgTable(
+  "wifi_devices",
+  {
+    id: serial("id").primaryKey(),
+    tenantId: varchar("tenant_id").notNull(),
+    macAddress: varchar("mac_address").notNull(),
+    ipAddress: varchar("ip_address").notNull(),
+    hostname: text("hostname"),
+    manufacturer: text("manufacturer"),
+    assetId: varchar("asset_id"),
+    assetName: text("asset_name"),
+    isAuthorized: boolean("is_authorized").default(false),
+    firstSeen: timestamp("first_seen").defaultNow(),
+    lastSeen: timestamp("last_seen").defaultNow(),
+    isActive: boolean("is_active").default(true),
+    connectionDuration: integer("connection_duration").default(0),
+    deviceType: text("device_type"),
+    metadata: jsonb("metadata").$type<Record<string, any>>(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_wifi_devices_tenant").on(table.tenantId),
+    idxMac: index("idx_wifi_devices_mac").on(table.macAddress),
+    idxActive: index("idx_wifi_devices_active").on(table.tenantId, table.isActive),
+    uniqueTenantMac: uniqueIndex("uniq_wifi_devices_tenant_mac").on(table.tenantId, table.macAddress),
+  })
+);
+
+export const networkAlerts = pgTable(
+  "network_alerts",
+  {
+    id: serial("id").primaryKey(),
+    tenantId: varchar("tenant_id").notNull(),
+    macAddress: varchar("mac_address").notNull(),
+    ipAddress: varchar("ip_address").notNull(),
+    hostname: text("hostname"),
+    manufacturer: text("manufacturer"),
+    detectedAt: timestamp("detected_at").defaultNow(),
+    acknowledgedAt: timestamp("acknowledged_at"),
+    acknowledgedBy: varchar("acknowledged_by"),
+    status: text("status").notNull().default("new"), // 'new', 'acknowledged', 'resolved'
+    notes: text("notes"),
+    deviceInfo: jsonb("device_info").$type<Record<string, any>>(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_network_alerts_tenant").on(table.tenantId),
+    idxStatus: index("idx_network_alerts_status").on(table.tenantId, table.status),
+    idxDetected: index("idx_network_alerts_detected").on(table.detectedAt),
+  })
+);
+
+// API Keys for Network Agents
+export const networkAgentKeys = pgTable(
+  "network_agent_keys",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    apiKey: varchar("api_key").notNull().unique(),
+    agentName: text("agent_name").notNull(),
+    description: text("description"),
+    isActive: boolean("is_active").default(true),
+    lastUsedAt: timestamp("last_used_at"),
+    createdBy: varchar("created_by"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_network_agent_keys_tenant").on(table.tenantId),
+    idxApiKey: index("idx_network_agent_keys_api_key").on(table.apiKey),
+  })
+);
+
+// Validation Schemas for Phase 3
+export const insertOffboardingPlaybookSchema = createInsertSchema(offboardingPlaybooks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertOffboardingRequestSchema = createInsertSchema(offboardingRequests).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  initiatedAt: true,
+});
+
+export const insertOffboardingTaskSchema = createInsertSchema(offboardingTasks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertHrIntegrationSchema = createInsertSchema(hrIntegrations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+// Types for Phase 3
+export type OffboardingPlaybook = typeof offboardingPlaybooks.$inferSelect;
+export type InsertOffboardingPlaybook = z.infer<typeof insertOffboardingPlaybookSchema>;
+export type OffboardingRequest = typeof offboardingRequests.$inferSelect;
+export type InsertOffboardingRequest = z.infer<typeof insertOffboardingRequestSchema>;
+export type OffboardingTask = typeof offboardingTasks.$inferSelect;
+export type InsertOffboardingTask = z.infer<typeof insertOffboardingTaskSchema>;
+export type HrIntegration = typeof hrIntegrations.$inferSelect;
+export type InsertHrIntegration = z.infer<typeof insertHrIntegrationSchema>;
+
+// ========================================
+// Phase 4: Policy Automation Engine
+// ========================================
+
+// Automated Policies Table
+export const automatedPolicies = pgTable(
+  "automated_policies",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    enabled: boolean("enabled").default(true),
+    priority: integer("priority").default(0),
+
+    // Trigger (IF)
+    triggerType: text("trigger_type").notNull(),
+    triggerConfig: jsonb("trigger_config").$type<Record<string, any>>().notNull(),
+
+    // Conditions
+    conditions: jsonb("conditions").$type<Record<string, any>>(),
+
+    // Actions (THEN)
+    actions: jsonb("actions").$type<Array<{
+      type: string;
+      config: Record<string, any>;
+    }>>().notNull(),
+
+    // Execution settings
+    cooldownMinutes: integer("cooldown_minutes").default(0),
+    maxExecutionsPerDay: integer("max_executions_per_day"),
+    requireApproval: boolean("require_approval").default(false),
+
+    // Statistics
+    executionCount: integer("execution_count").default(0),
+    successCount: integer("success_count").default(0),
+    failureCount: integer("failure_count").default(0),
+    lastExecutedAt: timestamp("last_executed_at"),
+
+    // Metadata
+    createdBy: varchar("created_by").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_automated_policies_tenant").on(table.tenantId),
+    idxTrigger: index("idx_automated_policies_trigger").on(table.triggerType, table.enabled),
+    idxTenantEnabled: index("idx_automated_policies_tenant_enabled").on(table.tenantId, table.enabled),
+  })
+);
+
+// Policy Executions Table
+export const policyExecutions = pgTable(
+  "policy_executions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    policyId: varchar("policy_id").notNull(),
+
+    // Trigger context
+    triggerEvent: text("trigger_event").notNull(),
+    triggerData: jsonb("trigger_data").$type<Record<string, any>>().notNull(),
+
+    // Execution details
+    status: text("status").notNull().default('pending'),
+    startedAt: timestamp("started_at").defaultNow(),
+    completedAt: timestamp("completed_at"),
+
+    // Actions executed
+    actionsExecuted: integer("actions_executed").default(0),
+    actionsSucceeded: integer("actions_succeeded").default(0),
+    actionsFailed: integer("actions_failed").default(0),
+
+    // Results
+    result: jsonb("result").$type<Record<string, any>>(),
+    errorMessage: text("error_message"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_policy_executions_tenant").on(table.tenantId),
+    idxPolicy: index("idx_policy_executions_policy").on(table.policyId),
+    idxStatus: index("idx_policy_executions_status").on(table.status),
+    idxCreated: index("idx_policy_executions_created").on(table.createdAt),
+  })
+);
+
+// Policy Templates Table
+export const policyTemplates = pgTable(
+  "policy_templates",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    name: text("name").notNull(),
+    category: text("category").notNull(),
+    description: text("description").notNull(),
+    icon: text("icon"),
+
+    // Template configuration
+    triggerType: text("trigger_type").notNull(),
+    triggerConfig: jsonb("trigger_config").$type<Record<string, any>>().notNull(),
+    conditions: jsonb("conditions").$type<Record<string, any>>(),
+    actions: jsonb("actions").$type<Array<{
+      type: string;
+      config: Record<string, any>;
+    }>>().notNull(),
+
+    // Metadata
+    isSystem: boolean("is_system").default(false),
+    popularity: integer("popularity").default(0),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxCategory: index("idx_policy_templates_category").on(table.category),
+    idxPopularity: index("idx_policy_templates_popularity").on(table.popularity),
+  })
+);
+
+// Policy Approvals Table
+export const policyApprovals = pgTable(
+  "policy_approvals",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    executionId: varchar("execution_id").notNull(),
+    policyId: varchar("policy_id").notNull(),
+
+    status: text("status").notNull().default('pending'),
+    requestedAt: timestamp("requested_at").defaultNow(),
+    requestedBy: varchar("requested_by"),
+
+    approvedBy: varchar("approved_by"),
+    approvedAt: timestamp("approved_at"),
+    approvalNotes: text("approval_notes"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_policy_approvals_tenant").on(table.tenantId),
+    idxStatus: index("idx_policy_approvals_status").on(table.status),
+    idxExecution: index("idx_policy_approvals_execution").on(table.executionId),
+  })
+);
+
+// Validation Schemas for Phase 4
+export const insertAutomatedPolicySchema = createInsertSchema(automatedPolicies).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  executionCount: true,
+  successCount: true,
+  failureCount: true,
+  lastExecutedAt: true,
+});
+
+export const insertPolicyExecutionSchema = createInsertSchema(policyExecutions).omit({
+  id: true,
+  createdAt: true,
+  startedAt: true,
+});
+
+export const insertPolicyTemplateSchema = createInsertSchema(policyTemplates).omit({
+  id: true,
+  createdAt: true,
+  popularity: true,
+});
+
+export const insertPolicyApprovalSchema = createInsertSchema(policyApprovals).omit({
+  id: true,
+  createdAt: true,
+  requestedAt: true,
+});
+
+// Types for Phase 4
+export type AutomatedPolicy = typeof automatedPolicies.$inferSelect;
+export type InsertAutomatedPolicy = z.infer<typeof insertAutomatedPolicySchema>;
+export type PolicyExecution = typeof policyExecutions.$inferSelect;
+export type InsertPolicyExecution = z.infer<typeof insertPolicyExecutionSchema>;
+export type PolicyTemplate = typeof policyTemplates.$inferSelect;
+export type InsertPolicyTemplate = z.infer<typeof insertPolicyTemplateSchema>;
+export type PolicyApproval = typeof policyApprovals.$inferSelect;
+export type InsertPolicyApproval = z.infer<typeof insertPolicyApprovalSchema>;
+
+// ========================================
+// Phase 5: Identity Governance & Access Reviews
+// ========================================
+
+// Access Review Campaigns
+export const accessReviewCampaigns = pgTable(
+  "access_review_campaigns",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Campaign details
+    name: text("name").notNull(),
+    description: text("description"),
+    campaignType: text("campaign_type").notNull(), // 'quarterly', 'department', 'high_risk', 'admin', 'new_hire', 'departure'
+    frequency: text("frequency"), // 'quarterly', 'semi_annual', 'annual', 'one_time'
+
+    // Scope
+    scopeType: text("scope_type").notNull().default("all"), // 'all', 'department', 'apps', 'users'
+    scopeConfig: jsonb("scope_config").$type<Record<string, any>>(),
+
+    // Schedule
+    startDate: timestamp("start_date").notNull(),
+    dueDate: timestamp("due_date").notNull(),
+    autoApproveOnTimeout: boolean("auto_approve_on_timeout").default(false),
+
+    // Status tracking
+    status: text("status").notNull().default("draft"), // 'draft', 'active', 'completed', 'cancelled'
+    totalItems: integer("total_items").default(0),
+    reviewedItems: integer("reviewed_items").default(0),
+    approvedItems: integer("approved_items").default(0),
+    revokedItems: integer("revoked_items").default(0),
+    deferredItems: integer("deferred_items").default(0),
+
+    // Audit
+    createdBy: varchar("created_by").notNull(),
+    completedAt: timestamp("completed_at"),
+    completionReportUrl: text("completion_report_url"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_access_review_campaigns_tenant").on(table.tenantId),
+    idxStatus: index("idx_access_review_campaigns_status").on(table.tenantId, table.status),
+    idxDue: index("idx_access_review_campaigns_due").on(table.dueDate),
+  })
+);
+
+// Access Review Items
+export const accessReviewItems = pgTable(
+  "access_review_items",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    campaignId: varchar("campaign_id").notNull(),
+
+    // What to review
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    userManager: text("user_manager"),
+
+    appId: varchar("app_id").notNull(),
+    appName: text("app_name").notNull(),
+    accessType: text("access_type"),
+
+    // Context
+    grantedDate: timestamp("granted_date"),
+    lastUsedDate: timestamp("last_used_date"),
+    daysSinceLastUse: integer("days_since_last_use"),
+    businessJustification: text("business_justification"),
+    riskLevel: text("risk_level"), // 'low', 'medium', 'high', 'critical'
+
+    // Review
+    reviewerId: varchar("reviewer_id"),
+    reviewerName: text("reviewer_name"),
+    decision: text("decision").default("pending"), // 'pending', 'approved', 'revoked', 'deferred'
+    decisionNotes: text("decision_notes"),
+    reviewedAt: timestamp("reviewed_at"),
+
+    // Execution
+    executionStatus: text("execution_status").default("pending"), // 'pending', 'completed', 'failed'
+    executedAt: timestamp("executed_at"),
+    executionError: text("execution_error"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxCampaign: index("idx_access_review_items_campaign").on(table.campaignId),
+    idxReviewer: index("idx_access_review_items_reviewer").on(table.reviewerId, table.decision),
+    idxUser: index("idx_access_review_items_user").on(table.userId),
+    idxApp: index("idx_access_review_items_app").on(table.appId),
+  })
+);
+
+// Access Review Decisions
+export const accessReviewDecisions = pgTable(
+  "access_review_decisions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    campaignId: varchar("campaign_id").notNull(),
+    reviewItemId: varchar("review_item_id").notNull(),
+
+    // Decision
+    decision: text("decision").notNull(), // 'approved', 'revoked', 'deferred'
+    decisionNotes: text("decision_notes"),
+    decisionRationale: text("decision_rationale"),
+
+    // Reviewer
+    reviewerId: varchar("reviewer_id").notNull(),
+    reviewerName: text("reviewer_name").notNull(),
+    reviewerEmail: text("reviewer_email"),
+
+    // Execution
+    executionStatus: text("execution_status").default("pending"),
+    executedAt: timestamp("executed_at"),
+    executionResult: jsonb("execution_result").$type<Record<string, any>>(),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxCampaign: index("idx_access_review_decisions_campaign").on(table.campaignId),
+    idxItem: index("idx_access_review_decisions_item").on(table.reviewItemId),
+    idxReviewer: index("idx_access_review_decisions_reviewer").on(table.reviewerId),
+  })
+);
+
+// Role Templates
+export const roleTemplates = pgTable(
+  "role_templates",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Role details
+    name: text("name").notNull(),
+    description: text("description"),
+    department: text("department"),
+    level: text("level"), // 'individual_contributor', 'manager', 'director', 'executive'
+
+    // Expected access
+    expectedApps: jsonb("expected_apps").$type<Array<{
+      appId: string;
+      appName: string;
+      accessType: string;
+      required: boolean;
+    }>>().notNull(),
+
+    // Metadata
+    userCount: integer("user_count").default(0),
+    isActive: boolean("is_active").default(true),
+
+    // Audit
+    createdBy: varchar("created_by").notNull(),
+    lastReviewedAt: timestamp("last_reviewed_at"),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_role_templates_tenant").on(table.tenantId),
+    idxDepartment: index("idx_role_templates_department").on(table.tenantId, table.department),
+    uniqTenantName: uniqueIndex("uniq_role_templates_tenant_name").on(table.tenantId, table.name),
+  })
+);
+
+// User Role Assignments
+export const userRoleAssignments = pgTable(
+  "user_role_assignments",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // Assignment
+    userId: varchar("user_id").notNull(),
+    roleTemplateId: varchar("role_template_id").notNull(),
+
+    // Tracking
+    effectiveDate: timestamp("effective_date").notNull().defaultNow(),
+    expiryDate: timestamp("expiry_date"),
+    assignedBy: varchar("assigned_by").notNull(),
+    assignmentReason: text("assignment_reason"),
+
+    // Review
+    nextReviewDate: timestamp("next_review_date"),
+    lastReviewedAt: timestamp("last_reviewed_at"),
+
+    // Status
+    isActive: boolean("is_active").default(true),
+
+    // Timestamps
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_user_role_assignments_tenant").on(table.tenantId),
+    idxUser: index("idx_user_role_assignments_user").on(table.userId, table.isActive),
+    idxRole: index("idx_user_role_assignments_role").on(table.roleTemplateId),
+  })
+);
+
+// Privilege Drift Alerts
+export const privilegeDriftAlerts = pgTable(
+  "privilege_drift_alerts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // User and role
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    roleTemplateId: varchar("role_template_id"),
+    roleName: text("role_name"),
+
+    // Drift details
+    expectedApps: jsonb("expected_apps").$type<Array<{ appId: string; appName: string }>>(),
+    actualApps: jsonb("actual_apps").$type<Array<{ appId: string; appName: string }>>(),
+    excessApps: jsonb("excess_apps").$type<Array<{ appId: string; appName: string }>>(),
+    missingApps: jsonb("missing_apps").$type<Array<{ appId: string; appName: string }>>(),
+
+    // Risk assessment
+    riskScore: integer("risk_score").default(0),
+    riskLevel: text("risk_level"), // 'low', 'medium', 'high', 'critical'
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+
+    // Recommended actions
+    recommendedAction: text("recommended_action"),
+    recommendedAppsToRevoke: jsonb("recommended_apps_to_revoke").$type<Array<{ appId: string; appName: string }>>(),
+
+    // Status
+    status: text("status").default("open"), // 'open', 'in_review', 'resolved', 'deferred', 'false_positive'
+    resolutionNotes: text("resolution_notes"),
+    resolvedBy: varchar("resolved_by"),
+    resolvedAt: timestamp("resolved_at"),
+
+    // Timestamps
+    detectedAt: timestamp("detected_at").defaultNow(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_privilege_drift_alerts_tenant").on(table.tenantId),
+    idxUser: index("idx_privilege_drift_alerts_user").on(table.userId, table.status),
+    idxRisk: index("idx_privilege_drift_alerts_risk").on(table.tenantId, table.riskLevel, table.status),
+    idxDetected: index("idx_privilege_drift_alerts_detected").on(table.detectedAt),
+  })
+);
+
+// Overprivileged Accounts
+export const overprivilegedAccounts = pgTable(
+  "overprivileged_accounts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+
+    // User details
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    userTitle: text("user_title"),
+
+    // Overprivilege details
+    adminAppCount: integer("admin_app_count").default(0),
+    adminApps: jsonb("admin_apps").$type<Array<{
+      appId: string;
+      appName: string;
+      accessType: string;
+      grantedAt: string;
+      lastUsedAt: string;
+    }>>(),
+
+    // Stale access
+    staleAdminCount: integer("stale_admin_count").default(0),
+    staleAdminApps: jsonb("stale_admin_apps").$type<Array<{
+      appId: string;
+      appName: string;
+      daysSinceLastUse: number;
+    }>>(),
+
+    // Cross-department access
+    crossDeptAdminCount: integer("cross_dept_admin_count").default(0),
+    crossDeptAdminApps: jsonb("cross_dept_admin_apps").$type<Array<{
+      appId: string;
+      appName: string;
+      appCategory: string;
+    }>>(),
+
+    // Risk assessment
+    riskScore: integer("risk_score").default(0),
+    riskLevel: text("risk_level"), // 'low', 'medium', 'high', 'critical'
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+
+    // Business justification
+    hasJustification: boolean("has_justification").default(false),
+    justificationText: text("justification_text"),
+    justificationApprovedBy: varchar("justification_approved_by"),
+    justificationExpiresAt: timestamp("justification_expires_at"),
+
+    // Recommendations
+    recommendedAction: text("recommended_action"),
+    recommendedAppsToDowngrade: jsonb("recommended_apps_to_downgrade").$type<Array<{
+      appId: string;
+      appName: string;
+      currentAccess: string;
+      recommendedAccess: string;
+    }>>(),
+    leastPrivilegeAlternative: text("least_privilege_alternative"),
+
+    // Status
+    status: text("status").default("open"), // 'open', 'in_remediation', 'resolved', 'deferred', 'accepted_risk'
+    remediationPlan: text("remediation_plan"),
+    remediationDeadline: timestamp("remediation_deadline"),
+    resolvedBy: varchar("resolved_by"),
+    resolvedAt: timestamp("resolved_at"),
+    resolutionNotes: text("resolution_notes"),
+
+    // Timestamps
+    detectedAt: timestamp("detected_at").defaultNow(),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_overprivileged_accounts_tenant").on(table.tenantId),
+    idxUser: index("idx_overprivileged_accounts_user").on(table.userId, table.status),
+    idxRisk: index("idx_overprivileged_accounts_risk").on(table.tenantId, table.riskLevel, table.status),
+    idxDetected: index("idx_overprivileged_accounts_detected").on(table.detectedAt),
+  })
+);
+
+// Validation schemas for Phase 5
+export const insertAccessReviewCampaignSchema = createInsertSchema(accessReviewCampaigns).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAccessReviewItemSchema = createInsertSchema(accessReviewItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAccessReviewDecisionSchema = createInsertSchema(accessReviewDecisions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertRoleTemplateSchema = createInsertSchema(roleTemplates).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertUserRoleAssignmentSchema = createInsertSchema(userRoleAssignments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertPrivilegeDriftAlertSchema = createInsertSchema(privilegeDriftAlerts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertOverprivilegedAccountSchema = createInsertSchema(overprivilegedAccounts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+// Types for Phase 5
+export type AccessReviewCampaign = typeof accessReviewCampaigns.$inferSelect;
+export type InsertAccessReviewCampaign = z.infer<typeof insertAccessReviewCampaignSchema>;
+export type AccessReviewItem = typeof accessReviewItems.$inferSelect;
+export type InsertAccessReviewItem = z.infer<typeof insertAccessReviewItemSchema>;
+export type AccessReviewDecision = typeof accessReviewDecisions.$inferSelect;
+export type InsertAccessReviewDecision = z.infer<typeof insertAccessReviewDecisionSchema>;
+export type RoleTemplate = typeof roleTemplates.$inferSelect;
+export type InsertRoleTemplate = z.infer<typeof insertRoleTemplateSchema>;
+export type UserRoleAssignment = typeof userRoleAssignments.$inferSelect;
+export type InsertUserRoleAssignment = z.infer<typeof insertUserRoleAssignmentSchema>;
+export type PrivilegeDriftAlert = typeof privilegeDriftAlerts.$inferSelect;
+export type InsertPrivilegeDriftAlert = z.infer<typeof insertPrivilegeDriftAlertSchema>;
+export type OverprivilegedAccount = typeof overprivilegedAccounts.$inferSelect;
+export type InsertOverprivilegedAccount = z.infer<typeof insertOverprivilegedAccountSchema>;
+
+// ============================================
+// Phase 6: Advanced Features & AI Intelligence
+// ============================================
+
+// Access Requests (6.1)
+export const accessRequests = pgTable(
+  "access_requests",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    requesterId: varchar("requester_id").notNull(),
+    requesterName: text("requester_name").notNull(),
+    requesterEmail: text("requester_email"),
+    requesterDepartment: text("requester_department"),
+    appId: varchar("app_id").notNull(),
+    appName: text("app_name").notNull(),
+    accessType: text("access_type").notNull(),
+    justification: text("justification").notNull(),
+    durationType: text("duration_type").default("permanent"),
+    durationHours: integer("duration_hours"),
+    expiresAt: timestamp("expires_at"),
+    status: text("status").notNull().default("pending"),
+    approverId: varchar("approver_id"),
+    approverName: text("approver_name"),
+    approvalNotes: text("approval_notes"),
+    reviewedAt: timestamp("reviewed_at"),
+    riskScore: integer("risk_score").default(0),
+    riskLevel: text("risk_level"),
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+    sodConflicts: jsonb("sod_conflicts").$type<any[]>(),
+    provisioningStatus: text("provisioning_status").default("pending"),
+    provisionedAt: timestamp("provisioned_at"),
+    provisioningError: text("provisioning_error"),
+    slaDueAt: timestamp("sla_due_at"),
+    isOverdue: boolean("is_overdue").default(false),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_access_requests_tenant").on(table.tenantId),
+    idxRequester: index("idx_access_requests_requester").on(table.requesterId, table.status),
+    idxApprover: index("idx_access_requests_approver").on(table.approverId, table.status),
+    idxStatus: index("idx_access_requests_status").on(table.tenantId, table.status),
+  })
+);
+
+// JIT Access Sessions (6.2)
+export const jitAccessSessions = pgTable(
+  "jit_access_sessions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    appId: varchar("app_id").notNull(),
+    appName: text("app_name").notNull(),
+    accessType: text("access_type").notNull(),
+    previousAccessType: text("previous_access_type"),
+    justification: text("justification").notNull(),
+    durationHours: integer("duration_hours").notNull(),
+    startsAt: timestamp("starts_at").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    requiresApproval: boolean("requires_approval").default(true),
+    approvedBy: varchar("approved_by"),
+    approvedAt: timestamp("approved_at"),
+    mfaVerified: boolean("mfa_verified").default(false),
+    mfaVerifiedAt: timestamp("mfa_verified_at"),
+    status: text("status").notNull().default("pending"),
+    activatedAt: timestamp("activated_at"),
+    revokedAt: timestamp("revoked_at"),
+    revokedBy: varchar("revoked_by"),
+    revokeReason: text("revoke_reason"),
+    accessCount: integer("access_count").default(0),
+    lastAccessAt: timestamp("last_access_at"),
+    extensionRequested: boolean("extension_requested").default(false),
+    extensionApproved: boolean("extension_approved").default(false),
+    extendedByHours: integer("extended_by_hours"),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_jit_sessions_tenant").on(table.tenantId),
+    idxUser: index("idx_jit_sessions_user").on(table.userId, table.status),
+    idxStatus: index("idx_jit_sessions_status").on(table.tenantId, table.status),
+  })
+);
+
+// SoD Rules (6.3)
+export const sodRules = pgTable(
+  "sod_rules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    severity: text("severity").notNull(),
+    appId1: varchar("app_id_1").notNull(),
+    appName1: text("app_name_1").notNull(),
+    accessType1: text("access_type_1"),
+    appId2: varchar("app_id_2").notNull(),
+    appName2: text("app_name_2").notNull(),
+    accessType2: text("access_type_2"),
+    complianceFramework: text("compliance_framework"),
+    rationale: text("rationale"),
+    exemptedUsers: jsonb("exempted_users").$type<string[]>(),
+    isActive: boolean("is_active").default(true),
+    createdBy: varchar("created_by").notNull(),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_sod_rules_tenant").on(table.tenantId),
+    idxApps: index("idx_sod_rules_apps").on(table.appId1, table.appId2),
+  })
+);
+
+// SoD Violations (6.3)
+export const sodViolations = pgTable(
+  "sod_violations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    sodRuleId: varchar("sod_rule_id").notNull(),
+    ruleName: text("rule_name").notNull(),
+    severity: text("severity").notNull(),
+    app1Id: varchar("app_1_id").notNull(),
+    app1Name: text("app_1_name").notNull(),
+    accessType1: text("access_type_1"),
+    app2Id: varchar("app_2_id").notNull(),
+    app2Name: text("app_2_name").notNull(),
+    accessType2: text("access_type_2"),
+    riskScore: integer("risk_score").default(0),
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+    recommendedAction: text("recommended_action"),
+    remediationPlan: text("remediation_plan"),
+    status: text("status").notNull().default("open"),
+    resolvedBy: varchar("resolved_by"),
+    resolvedAt: timestamp("resolved_at"),
+    resolutionNotes: text("resolution_notes"),
+    detectedAt: timestamp("detected_at").default(sql`NOW()`),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_sod_violations_tenant").on(table.tenantId),
+    idxUser: index("idx_sod_violations_user").on(table.userId, table.status),
+    idxRule: index("idx_sod_violations_rule").on(table.sodRuleId),
+    idxStatus: index("idx_sod_violations_status").on(table.tenantId, table.status),
+  })
+);
+
+// Review Suggestions (6.4)
+export const reviewSuggestions = pgTable(
+  "review_suggestions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    reviewItemId: varchar("review_item_id").notNull(),
+    campaignId: varchar("campaign_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    appId: varchar("app_id").notNull(),
+    appName: text("app_name").notNull(),
+    predictedDecision: text("predicted_decision").notNull(),
+    confidenceScore: decimal("confidence_score", { precision: 5, scale: 2 }).notNull(),
+    factors: jsonb("factors").$type<Array<{ factor: string; weight: number; explanation: string }>>().notNull(),
+    similarCases: jsonb("similar_cases").$type<Array<{ userId: string; appId: string; decision: string; similarity: number }>>(),
+    modelVersion: text("model_version"),
+    modelTrainedAt: timestamp("model_trained_at"),
+    featuresUsed: jsonb("features_used").$type<string[]>(),
+    actualDecision: text("actual_decision"),
+    wasCorrect: boolean("was_correct"),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_review_suggestions_tenant").on(table.tenantId),
+    idxCampaign: index("idx_review_suggestions_campaign").on(table.campaignId),
+    idxItem: index("idx_review_suggestions_item").on(table.reviewItemId),
+  })
+);
+
+// Anomaly Detections (6.5)
+export const anomalyDetections = pgTable(
+  "anomaly_detections",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    anomalyType: text("anomaly_type").notNull(),
+    severity: text("severity").notNull(),
+    confidenceScore: decimal("confidence_score", { precision: 5, scale: 2 }).notNull(),
+    appId: varchar("app_id"),
+    appName: text("app_name"),
+    eventType: text("event_type"),
+    eventCount: integer("event_count"),
+    eventTime: timestamp("event_time"),
+    baselineValue: decimal("baseline_value", { precision: 10, scale: 2 }),
+    actualValue: decimal("actual_value", { precision: 10, scale: 2 }),
+    deviationPercent: decimal("deviation_percent", { precision: 10, scale: 2 }),
+    locationCountry: text("location_country"),
+    locationCity: text("location_city"),
+    ipAddress: text("ip_address"),
+    isNewLocation: boolean("is_new_location").default(false),
+    riskScore: integer("risk_score").default(0),
+    riskFactors: jsonb("risk_factors").$type<string[]>(),
+    status: text("status").notNull().default("open"),
+    investigatedBy: varchar("investigated_by"),
+    investigatedAt: timestamp("investigated_at"),
+    investigationNotes: text("investigation_notes"),
+    actionTaken: text("action_taken"),
+    actionAt: timestamp("action_at"),
+    detectedAt: timestamp("detected_at").default(sql`NOW()`),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_anomaly_detections_tenant").on(table.tenantId),
+    idxUser: index("idx_anomaly_detections_user").on(table.userId, table.status),
+    idxType: index("idx_anomaly_detections_type").on(table.tenantId, table.anomalyType, table.severity),
+    idxStatus: index("idx_anomaly_detections_status").on(table.tenantId, table.status),
+    idxDetected: index("idx_anomaly_detections_detected").on(table.detectedAt),
+  })
+);
+
+// Peer Group Baselines (6.6)
+export const peerGroupBaselines = pgTable(
+  "peer_group_baselines",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    department: text("department").notNull(),
+    jobTitle: text("job_title"),
+    jobLevel: text("job_level"),
+    groupSize: integer("group_size").notNull(),
+    commonApps: jsonb("common_apps").$type<Array<{ appId: string; appName: string; percentage: number; accessType: string }>>().notNull(),
+    averageAppCount: decimal("average_app_count", { precision: 5, scale: 2 }),
+    stdDevAppCount: decimal("std_dev_app_count", { precision: 5, scale: 2 }),
+    analyzedAt: timestamp("analyzed_at").notNull(),
+    nextAnalysisAt: timestamp("next_analysis_at"),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_peer_baselines_tenant").on(table.tenantId),
+    idxGroup: index("idx_peer_baselines_group").on(table.tenantId, table.department, table.jobTitle, table.jobLevel),
+  })
+);
+
+// Peer Group Outliers (6.6)
+export const peerGroupOutliers = pgTable(
+  "peer_group_outliers",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    userEmail: text("user_email"),
+    userDepartment: text("user_department"),
+    userJobTitle: text("user_job_title"),
+    userJobLevel: text("user_job_level"),
+    peerGroupId: varchar("peer_group_id").notNull(),
+    outlierType: text("outlier_type").notNull(),
+    deviationScore: decimal("deviation_score", { precision: 10, scale: 2 }).notNull(),
+    excessApps: jsonb("excess_apps").$type<Array<{ appId: string; appName: string }>>(),
+    missingApps: jsonb("missing_apps").$type<Array<{ appId: string; appName: string }>>(),
+    totalAppCount: integer("total_app_count"),
+    peerAverageAppCount: decimal("peer_average_app_count", { precision: 5, scale: 2 }),
+    recommendedAdditions: jsonb("recommended_additions").$type<Array<{ appId: string; appName: string }>>(),
+    recommendedRemovals: jsonb("recommended_removals").$type<Array<{ appId: string; appName: string }>>(),
+    justification: text("justification"),
+    status: text("status").notNull().default("open"),
+    reviewedBy: varchar("reviewed_by"),
+    reviewedAt: timestamp("reviewed_at"),
+    reviewNotes: text("review_notes"),
+    detectedAt: timestamp("detected_at").default(sql`NOW()`),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_peer_outliers_tenant").on(table.tenantId),
+    idxUser: index("idx_peer_outliers_user").on(table.userId, table.status),
+    idxGroup: index("idx_peer_outliers_group").on(table.peerGroupId),
+    idxStatus: index("idx_peer_outliers_status").on(table.tenantId, table.status),
+  })
+);
+
+// Certification Schedules (6.7)
+export const certificationSchedules = pgTable(
+  "certification_schedules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    userId: varchar("user_id").notNull(),
+    userName: text("user_name").notNull(),
+    appId: varchar("app_id").notNull(),
+    appName: text("app_name").notNull(),
+    accessType: text("access_type"),
+    riskLevel: text("risk_level").notNull(),
+    reviewFrequency: text("review_frequency").notNull(),
+    frequencyReason: text("frequency_reason"),
+    lastReviewedAt: timestamp("last_reviewed_at"),
+    nextReviewAt: timestamp("next_review_at").notNull(),
+    isOverdue: boolean("is_overdue").default(false),
+    autoIncludeInCampaigns: boolean("auto_include_in_campaigns").default(true),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_cert_schedules_tenant").on(table.tenantId),
+    idxUser: index("idx_cert_schedules_user").on(table.userId),
+    idxNextReview: index("idx_cert_schedules_next_review").on(table.nextReviewAt),
+  })
+);
+
+// Integration Configs (6.8)
+export const integrationConfigs = pgTable(
+  "integration_configs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    integrationId: varchar("integration_id").notNull(),
+    integrationName: text("integration_name").notNull(),
+    integrationType: text("integration_type").notNull(),
+    enabled: boolean("enabled").default(false),
+    config: jsonb("config").notNull(),
+    oauthAccessToken: text("oauth_access_token"),
+    oauthRefreshToken: text("oauth_refresh_token"),
+    oauthExpiresAt: timestamp("oauth_expires_at"),
+    lastUsedAt: timestamp("last_used_at"),
+    eventCount: integer("event_count").default(0),
+    errorCount: integer("error_count").default(0),
+    lastError: text("last_error"),
+    lastErrorAt: timestamp("last_error_at"),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+    updatedAt: timestamp("updated_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxTenant: index("idx_integration_configs_tenant").on(table.tenantId),
+    idxType: index("idx_integration_configs_type").on(table.tenantId, table.integrationType),
+  })
+);
+
+// Integration Events (6.8)
+export const integrationEvents = pgTable(
+  "integration_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    integrationConfigId: varchar("integration_config_id").notNull(),
+    eventType: text("event_type").notNull(),
+    eventData: jsonb("event_data"),
+    status: text("status").notNull(),
+    responseCode: integer("response_code"),
+    responseBody: text("response_body"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").default(sql`NOW()`),
+  },
+  (table) => ({
+    idxConfig: index("idx_integration_events_config").on(table.integrationConfigId),
+    idxTenant: index("idx_integration_events_tenant").on(table.tenantId, table.createdAt),
+  })
+);
+
+// Validation schemas for Phase 6
+export const insertAccessRequestSchema = createInsertSchema(accessRequests).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertJitAccessSessionSchema = createInsertSchema(jitAccessSessions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertSodRuleSchema = createInsertSchema(sodRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertSodViolationSchema = createInsertSchema(sodViolations).omit({
+  id: true,
+  detectedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertReviewSuggestionSchema = createInsertSchema(reviewSuggestions).omit({
+  id: true,
+  createdAt: true,
+});
+export const insertAnomalyDetectionSchema = createInsertSchema(anomalyDetections).omit({
+  id: true,
+  detectedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertPeerGroupBaselineSchema = createInsertSchema(peerGroupBaselines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertPeerGroupOutlierSchema = createInsertSchema(peerGroupOutliers).omit({
+  id: true,
+  detectedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertCertificationScheduleSchema = createInsertSchema(certificationSchedules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertIntegrationConfigSchema = createInsertSchema(integrationConfigs).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export const insertIntegrationEventSchema = createInsertSchema(integrationEvents).omit({
+  id: true,
+  createdAt: true,
+});
+
+// Types for Phase 6
+export type AccessRequest = typeof accessRequests.$inferSelect;
+export type InsertAccessRequest = z.infer<typeof insertAccessRequestSchema>;
+export type JitAccessSession = typeof jitAccessSessions.$inferSelect;
+export type InsertJitAccessSession = z.infer<typeof insertJitAccessSessionSchema>;
+export type SodRule = typeof sodRules.$inferSelect;
+export type InsertSodRule = z.infer<typeof insertSodRuleSchema>;
+export type SodViolation = typeof sodViolations.$inferSelect;
+export type InsertSodViolation = z.infer<typeof insertSodViolationSchema>;
+export type ReviewSuggestion = typeof reviewSuggestions.$inferSelect;
+export type InsertReviewSuggestion = z.infer<typeof insertReviewSuggestionSchema>;
+export type AnomalyDetection = typeof anomalyDetections.$inferSelect;
+export type InsertAnomalyDetection = z.infer<typeof insertAnomalyDetectionSchema>;
+export type PeerGroupBaseline = typeof peerGroupBaselines.$inferSelect;
+export type InsertPeerGroupBaseline = z.infer<typeof insertPeerGroupBaselineSchema>;
+export type PeerGroupOutlier = typeof peerGroupOutliers.$inferSelect;
+export type InsertPeerGroupOutlier = z.infer<typeof insertPeerGroupOutlierSchema>;
+export type CertificationSchedule = typeof certificationSchedules.$inferSelect;
+export type InsertCertificationSchedule = z.infer<typeof insertCertificationScheduleSchema>;
+export type IntegrationConfig = typeof integrationConfigs.$inferSelect;
+export type InsertIntegrationConfig = z.infer<typeof insertIntegrationConfigSchema>;
+export type IntegrationEvent = typeof integrationEvents.$inferSelect;
+export type InsertIntegrationEvent = z.infer<typeof insertIntegrationEventSchema>;
+
+// ============================================================================
+// CASB Integration Tables
+// ============================================================================
+
+export const casbIntegrations = pgTable(
+  "casb_integrations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    provider: text("provider").notNull(),
+    apiEndpoint: text("api_endpoint").notNull(),
+    apiKey: text("api_key"),
+    apiSecret: text("api_secret"),
+    oauthConfig: jsonb("oauth_config"),
+    syncEnabled: boolean("sync_enabled").default(true),
+    syncIntervalMinutes: integer("sync_interval_minutes").default(60),
+    lastSyncAt: timestamp("last_sync_at"),
+    nextSyncAt: timestamp("next_sync_at"),
+    syncStatus: text("sync_status").default("idle"),
+    syncError: text("sync_error"),
+    featuresEnabled: jsonb("features_enabled").default('["app_discovery", "risk_scoring", "dlp_alerts"]'),
+    totalAppsSynced: integer("total_apps_synced").default(0),
+    totalEventsSynced: integer("total_events_synced").default(0),
+    status: text("status").notNull().default("active"),
+    connectionVerified: boolean("connection_verified").default(false),
+    lastHealthCheckAt: timestamp("last_health_check_at"),
+    config: jsonb("config"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_casb_integrations_tenant").on(table.tenantId, table.status),
+    idxProvider: index("idx_casb_integrations_provider").on(table.tenantId, table.provider),
+  })
+);
+
+export const casbEvents = pgTable(
+  "casb_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    integrationId: varchar("integration_id").notNull(),
+    externalEventId: text("external_event_id"),
+    eventType: text("event_type").notNull(),
+    eventCategory: text("event_category"),
+    title: text("title"),
+    description: text("description"),
+    severity: text("severity").default("medium"),
+    appName: text("app_name"),
+    appDomain: text("app_domain"),
+    userEmail: text("user_email"),
+    userId: varchar("user_id"),
+    deviceId: varchar("device_id"),
+    riskScore: integer("risk_score"),
+    riskFactors: jsonb("risk_factors"),
+    dlpPolicyName: text("dlp_policy_name"),
+    dlpViolationType: text("dlp_violation_type"),
+    sensitiveDataTypes: jsonb("sensitive_data_types"),
+    bytesTransferred: integer("bytes_transferred"),
+    fileNames: jsonb("file_names"),
+    processed: boolean("processed").default(false),
+    processedAt: timestamp("processed_at"),
+    linkedAppId: varchar("linked_app_id"),
+    alertGenerated: boolean("alert_generated").default(false),
+    rawEvent: jsonb("raw_event"),
+    eventTimestamp: timestamp("event_timestamp").notNull(),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantType: index("idx_casb_events_tenant_type").on(table.tenantId, table.eventType),
+    idxIntegration: index("idx_casb_events_integration").on(table.integrationId),
+    idxProcessed: index("idx_casb_events_processed").on(table.tenantId, table.processed),
+    idxTimestamp: index("idx_casb_events_timestamp").on(table.eventTimestamp),
+  })
+);
+
+// CASB schemas
+export const insertCasbIntegrationSchema = createInsertSchema(casbIntegrations);
+export const insertCasbEventSchema = createInsertSchema(casbEvents);
+
+// CASB types
+export type CasbIntegration = typeof casbIntegrations.$inferSelect;
+export type InsertCasbIntegration = z.infer<typeof insertCasbIntegrationSchema>;
+export type CasbEvent = typeof casbEvents.$inferSelect;
+export type InsertCasbEvent = z.infer<typeof insertCasbEventSchema>;
+
+// ============================================================================
+// Alert Configuration & Instances Tables
+// ============================================================================
+
+export const alertConfigurations = pgTable(
+  "alert_configurations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    alertType: text("alert_type").notNull(),
+    severity: text("severity").notNull().default("medium"),
+    enabled: boolean("enabled").default(true),
+    triggerConditions: jsonb("trigger_conditions"),
+    notificationChannelIds: jsonb("notification_channel_ids"),
+    cooldownMinutes: integer("cooldown_minutes").default(60),
+    createdBy: varchar("created_by"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_alert_configurations_tenant").on(table.tenantId),
+    idxEnabled: index("idx_alert_configurations_enabled").on(table.tenantId, table.enabled),
+    idxType: index("idx_alert_configurations_type").on(table.tenantId, table.alertType),
+  })
+);
+
+export const alertInstances = pgTable(
+  "alert_instances",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    configurationId: varchar("configuration_id"),
+    alertType: text("alert_type").notNull(),
+    severity: text("severity").notNull().default("medium"),
+    title: text("title").notNull(),
+    description: text("description"),
+    sourceEntity: text("source_entity"),
+    sourceEntityId: varchar("source_entity_id"),
+    status: text("status").notNull().default("open"),
+    acknowledgedBy: varchar("acknowledged_by"),
+    acknowledgedAt: timestamp("acknowledged_at"),
+    resolvedBy: varchar("resolved_by"),
+    resolvedAt: timestamp("resolved_at"),
+    resolutionNotes: text("resolution_notes"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_alert_instances_tenant").on(table.tenantId),
+    idxStatus: index("idx_alert_instances_status").on(table.tenantId, table.status),
+    idxConfig: index("idx_alert_instances_config").on(table.configurationId),
+    idxCreatedAt: index("idx_alert_instances_created").on(table.tenantId, table.createdAt),
+  })
+);
+
+// ============================================================================
+// Notification System Tables
+// ============================================================================
+
+export const notificationChannels = pgTable(
+  "notification_channels",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    type: text("type").notNull(),
+    enabled: boolean("enabled").default(true),
+    config: jsonb("config"),
+    createdBy: varchar("created_by"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_notification_channels_tenant").on(table.tenantId),
+    idxType: index("idx_notification_channels_type").on(table.tenantId, table.type),
+  })
+);
+
+export const roleNotifications = pgTable(
+  "role_notifications",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    role: text("role").notNull(),
+    notificationType: text("notification_type").notNull(),
+    title: text("title").notNull(),
+    message: text("message"),
+    priority: text("priority").default("normal"),
+    isRead: boolean("is_read").default(false),
+    readAt: timestamp("read_at"),
+    expiresAt: timestamp("expires_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenantRole: index("idx_role_notifications_tenant_role").on(table.tenantId, table.role),
+    idxUnread: index("idx_role_notifications_unread").on(table.tenantId, table.role, table.isRead),
+  })
+);
+
+// ============================================================================
+// Network Traffic Events Table
+// ============================================================================
+
+export const networkTrafficEvents = pgTable(
+  "network_traffic_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    agentId: varchar("agent_id"),
+    sourceIp: text("source_ip"),
+    destinationIp: text("destination_ip"),
+    destinationDomain: text("destination_domain"),
+    destinationPort: integer("destination_port"),
+    protocol: text("protocol"),
+    bytesIn: integer("bytes_in"),
+    bytesOut: integer("bytes_out"),
+    packetCount: integer("packet_count"),
+    applicationName: text("application_name"),
+    category: text("category"),
+    riskLevel: text("risk_level"),
+    userId: varchar("user_id"),
+    deviceId: varchar("device_id"),
+    eventTimestamp: timestamp("event_timestamp").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_network_traffic_tenant").on(table.tenantId),
+    idxTimestamp: index("idx_network_traffic_timestamp").on(table.tenantId, table.eventTimestamp),
+    idxDomain: index("idx_network_traffic_domain").on(table.tenantId, table.destinationDomain),
+    idxAgent: index("idx_network_traffic_agent").on(table.agentId),
+  })
+);
+
+// ============================================================================
+// Remediation Executions Table
+// ============================================================================
+
+export const remediationExecutions = pgTable(
+  "remediation_executions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    type: text("type").notNull(),
+    sourceType: text("source_type"),
+    sourceId: varchar("source_id"),
+    appName: text("app_name"),
+    appDomain: text("app_domain"),
+    status: text("status").notNull().default("pending_approval"),
+    priority: text("priority").default("medium"),
+    description: text("description"),
+    assignedTo: varchar("assigned_to"),
+    assignedAt: timestamp("assigned_at"),
+    approvedBy: varchar("approved_by"),
+    approvedAt: timestamp("approved_at"),
+    executedBy: varchar("executed_by"),
+    executedAt: timestamp("executed_at"),
+    completedAt: timestamp("completed_at"),
+    result: text("result"),
+    notes: text("notes"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").defaultNow(),
+    updatedAt: timestamp("updated_at").defaultNow(),
+  },
+  (table) => ({
+    idxTenant: index("idx_remediation_tenant").on(table.tenantId),
+    idxStatus: index("idx_remediation_status").on(table.tenantId, table.status),
+    idxAssigned: index("idx_remediation_assigned").on(table.assignedTo),
+    idxSource: index("idx_remediation_source").on(table.sourceType, table.sourceId),
+  })
+);
+
+// Alert & Notification schemas
+export const insertAlertConfigurationSchema = createInsertSchema(alertConfigurations);
+export const insertAlertInstanceSchema = createInsertSchema(alertInstances);
+export const insertNotificationChannelSchema = createInsertSchema(notificationChannels);
+export const insertRoleNotificationSchema = createInsertSchema(roleNotifications);
+export const insertNetworkTrafficEventSchema = createInsertSchema(networkTrafficEvents);
+export const insertRemediationExecutionSchema = createInsertSchema(remediationExecutions);
+
+// Alert & Notification types
+export type AlertConfiguration = typeof alertConfigurations.$inferSelect;
+export type InsertAlertConfiguration = z.infer<typeof insertAlertConfigurationSchema>;
+export type AlertInstance = typeof alertInstances.$inferSelect;
+export type InsertAlertInstance = z.infer<typeof insertAlertInstanceSchema>;
+export type NotificationChannel = typeof notificationChannels.$inferSelect;
+export type InsertNotificationChannel = z.infer<typeof insertNotificationChannelSchema>;
+export type RoleNotification = typeof roleNotifications.$inferSelect;
+export type InsertRoleNotification = z.infer<typeof insertRoleNotificationSchema>;
+export type NetworkTrafficEvent = typeof networkTrafficEvents.$inferSelect;
+export type InsertNetworkTrafficEvent = z.infer<typeof insertNetworkTrafficEventSchema>;
+export type RemediationExecution = typeof remediationExecutions.$inferSelect;
+export type InsertRemediationExecution = z.infer<typeof insertRemediationExecutionSchema>;
+

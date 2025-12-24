@@ -1,0 +1,89 @@
+#!/bin/bash
+set -euo pipefail
+
+# macOS PKG postinstall script - nonce-based enrollment
+# This script extracts the enrollment nonce from the install log,
+# exchanges it for the enrollment URL via the server API,
+# and runs the agent enrollment
+
+LOG="/var/log/install.log"
+API_BASE="${ITAM_SERVER_URL:-https://asset-management.pionedata.com}"
+CLAIM_URL="$API_BASE/api/agent/claim"
+
+# Ensure destination dir exists and script is executable
+/bin/mkdir -p /usr/local/ITAM || true
+/bin/chmod +x /usr/local/ITAM/oa_audit_macos.sh || true
+
+# Ensure log exists & writable
+/usr/bin/touch /var/log/itam-oa-audit.log || true
+/bin/chmod 644 /var/log/itam-oa-audit.log || true
+
+echo "$(date): ITAM Agent installation starting..." >> /var/log/itam-oa-audit.log
+
+# Extract nonce from install log
+# The PKG filename contains the nonce: itam-agent-{NONCE}.pkg
+PKG_LINE="$(tail -n 500 "$LOG" 2>/dev/null | grep -E 'itam-agent-[A-Za-z0-9_-]+\.pkg' | tail -n 1 || true)"
+NONCE="$(echo "$PKG_LINE" | sed -nE 's/.*itam-agent-([A-Za-z0-9_-]+)\.pkg.*/\1/p' | tail -n 1)"
+
+if [ -z "$NONCE" ]; then
+    echo "$(date): ERROR: Could not extract enrollment nonce from install log" >> /var/log/itam-oa-audit.log
+    echo "$(date): Searched in: $LOG" >> /var/log/itam-oa-audit.log
+    echo "$(date): Device will NOT be enrolled automatically" >> /var/log/itam-oa-audit.log
+    exit 1
+fi
+
+echo "$(date): Extracted nonce: ${NONCE:0:12}..." >> /var/log/itam-oa-audit.log
+
+# Gather device information
+SERIAL="$(/usr/sbin/system_profiler SPHardwareDataType | awk -F': ' '/Serial/ {print $2; exit}')"
+HOST="$(hostname -s 2>/dev/null || hostname)"
+OSV="$(sw_vers -productVersion 2>/dev/null || uname -r)"
+
+echo "$(date): Device info - Serial: $SERIAL, Hostname: $HOST, OS: $OSV" >> /var/log/itam-oa-audit.log
+
+# Claim enrollment session from server
+echo "$(date): Claiming enrollment session from: $CLAIM_URL" >> /var/log/itam-oa-audit.log
+
+RESP="$(/usr/bin/curl -fsS -X POST "$CLAIM_URL" \
+       -H 'Content-Type: application/json' \
+       -d "{\"nonce\":\"$NONCE\",\"serial\":\"$SERIAL\",\"hostname\":\"$HOST\",\"osv\":\"$OSV\"}" 2>&1)" || {
+    echo "$(date): ERROR: Failed to claim enrollment session" >> /var/log/itam-oa-audit.log
+    echo "$(date): Server response: $RESP" >> /var/log/itam-oa-audit.log
+    exit 1
+}
+
+# Extract enrollment URL from response
+ENROLL_URL="$(echo "$RESP" | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin).get("enrollUrl",""))' 2>/dev/null || echo "")"
+TENANT_ID="$(echo "$RESP" | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin).get("tenantId",""))' 2>/dev/null || echo "")"
+SERVER_URL="$(echo "$RESP" | /usr/bin/python3 -c 'import sys,json; print(json.load(sys.stdin).get("serverUrl",""))' 2>/dev/null || echo "")"
+
+if [ -z "$ENROLL_URL" ]; then
+    echo "$(date): ERROR: No enrollment URL returned from server" >> /var/log/itam-oa-audit.log
+    echo "$(date): Server response: $RESP" >> /var/log/itam-oa-audit.log
+    exit 1
+fi
+
+echo "$(date): ✓ Enrollment session claimed successfully" >> /var/log/itam-oa-audit.log
+echo "$(date): Tenant ID: $TENANT_ID" >> /var/log/itam-oa-audit.log
+echo "$(date): Server URL: $SERVER_URL" >> /var/log/itam-oa-audit.log
+
+# Extract token from enrollment URL
+ENROLLMENT_TOKEN="$(echo "$ENROLL_URL" | sed -nE 's/.*[?&]token=([^&]+).*/\1/p')"
+
+if [ -z "$ENROLLMENT_TOKEN" ]; then
+    echo "$(date): WARNING: Could not extract token from enrollment URL" >> /var/log/itam-oa-audit.log
+    ENROLLMENT_TOKEN="unknown"
+fi
+
+# Export environment variables for the audit script
+export ENROLLMENT_TOKEN
+export ITAM_SERVER_URL="${SERVER_URL:-$API_BASE}"
+
+echo "$(date): Starting device enrollment in background..." >> /var/log/itam-oa-audit.log
+
+# IMPORTANT: run from a writable dir so the OA script can create its XML
+# Run in background so the installer can finish
+/usr/bin/nohup /bin/bash -lc 'cd /var/tmp && ENROLLMENT_TOKEN="'"$ENROLLMENT_TOKEN"'" ITAM_SERVER_URL="'"$ITAM_SERVER_URL"'" /usr/local/ITAM/oa_audit_macos.sh' >> /var/log/itam-oa-audit.log 2>&1 &
+
+echo "$(date): ✓ ITAM Agent installation completed" >> /var/log/itam-oa-audit.log
+exit 0

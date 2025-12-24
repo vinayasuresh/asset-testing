@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "uniq_assets_tenant_serial" ON "assets" USING btree ("tenant_id","serial_number");--> statement-breakpoint
+CREATE UNIQUE INDEX "uniq_assets_tenant_name" ON "assets" USING btree ("tenant_id","name");
