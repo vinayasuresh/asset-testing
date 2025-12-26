@@ -39,36 +39,48 @@ jobs:
           docker push $COMMIT_IMAGE
           docker push $LATEST_IMAGE
 
-      - name: 🧹 Cleanup old GHCR images (keep last 2)
+      - name: 🧹 Cleanup old assetnext images (keep last 2)
         env:
           GH_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
           PACKAGE=assetnext
-
-          echo "📦 Fetching image versions..."
+          
+          echo "📦 Fetching assetnext image versions only..."
           VERSIONS=$(curl -s \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions)
+            "https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions" || echo "[]")
 
-          IDS=$(echo "$VERSIONS" | jq -r '.[].id')
-
-          KEEP=2
-          COUNT=0
-
-          for ID in $IDS; do
-            COUNT=$((COUNT+1))
-            if [ $COUNT -gt $KEEP ]; then
-              echo "🗑️ Deleting image version ID: $ID"
-              curl -X DELETE \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions/$ID
+          # Check if we got valid JSON response
+          if echo "$VERSIONS" | jq empty 2>/dev/null; then
+            # Get all version IDs, sorted by created date (newest first)
+            IDS=$(echo "$VERSIONS" | jq -r 'sort_by(.created_at) | reverse | .[].id' 2>/dev/null || echo "")
+            
+            if [ -n "$IDS" ]; then
+              KEEP=2
+              COUNT=0
+              
+              echo "🏷️ Found $(echo "$IDS" | wc -l) assetnext image versions"
+              
+              for ID in $IDS; do
+                COUNT=$((COUNT+1))
+                if [ $COUNT -gt $KEEP ]; then
+                  echo "🗑️ Deleting old assetnext image version ID: $ID"
+                  curl -s -X DELETE \
+                    -H "Authorization: Bearer $GH_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    "https://api.github.com/users/$USERNAME/packages/container/$PACKAGE/versions/$ID" || echo "❌ Failed to delete $ID"
+                else
+                  echo "✅ Keeping assetnext image version ID: $ID (newest $COUNT)"
+                fi
+              done
             else
-              echo "✅ Keeping image version ID: $ID"
+              echo "ℹ️ No assetnext image versions found to clean up"
             fi
-          done
+          else
+            echo "⚠️ Failed to fetch assetnext image versions, skipping cleanup"
+          fi
 
       - name: 🚀 Deploy to remote server
         uses: appleboy/ssh-action@v0.1.10
