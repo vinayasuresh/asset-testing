@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🧩 Checkout repository
+      - name: 🧩 Checkout repository hahahahahahaha
         uses: actions/checkout@v4
 
       - name: 🔑 Log in to GitHub Container Registry
