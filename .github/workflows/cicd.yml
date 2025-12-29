@@ -57,8 +57,11 @@ jobs:
             NETWORK_NAME=asset_network
 
             echo "🧹 Stopping existing app container..."
-            docker stop $APP_CONTAINER || true
-            docker rm $APP_CONTAINER || true
+            docker stop $APP_CONTAINER 2>/dev/null || true
+            docker rm -f $APP_CONTAINER 2>/dev/null || true
+            
+            echo "🧹 Cleaning up any orphaned containers..."
+            docker container prune -f 2>/dev/null || true
 
             echo "🌐 Creating Docker network..."
             docker network create $NETWORK_NAME || true
