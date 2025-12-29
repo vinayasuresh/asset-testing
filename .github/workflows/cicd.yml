@@ -112,11 +112,20 @@ jobs:
             sleep 10
 
             echo "🔍 Checking container status..."
+            echo "📊 Container status:"
+            docker ps -a --filter "name=$APP_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+            
+            echo "📋 App container logs:"
+            docker logs $APP_CONTAINER || echo "No logs available"
+            
             if docker ps --format '{{.Names}}' | grep -q "^${APP_CONTAINER}$"; then
               echo "✅ Deployment successful!"
-              docker logs --tail 20 $APP_CONTAINER
+              echo "🔗 App should be running on port 5926"
             else
               echo "❌ Deployment failed!"
-              docker logs $APP_CONTAINER || true
+              echo "🐘 DB container status:"
+              docker ps -a --filter "name=$DB_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+              echo "📋 DB container logs:"
+              docker logs --tail 10 $DB_CONTAINER || echo "No DB logs available"
               exit 1
             fi
