@@ -45,12 +45,6 @@ jobs:
             echo "🌐 Creating Docker network..."
             docker network create $NETWORK_NAME || true
 
-            echo "🧹 Cleaning up old Docker images to free disk space..."
-            docker image prune -af --filter "until=24h" || true
-            docker container prune -f || true
-            docker builder prune -af || true
-            echo "💾 Disk space after cleanup:"
-            df -h / | tail -1
 
             echo "📦 Pulling latest app image..."
             docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} -p ${{ secrets.GHCR_TOKEN }}
