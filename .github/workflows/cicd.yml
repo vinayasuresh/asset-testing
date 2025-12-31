@@ -11,34 +11,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🧩 Checkout repository hahahahahahaha
+      - name: 🧩 Checkout repository
         uses: actions/checkout@v4
 
       - name: 🔑 Log in to GitHub Container Registry
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
-
-      - name: 🏗️ Build and push app image (commit + latest)
+      - name: 🏗️ Build and push app image
         run: |
           USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
-          SHORT_SHA=${GITHUB_SHA::7}
-
-          IMAGE_BASE=ghcr.io/$USERNAME/assetnext
-          COMMIT_IMAGE=$IMAGE_BASE:$SHORT_SHA
-          LATEST_IMAGE=$IMAGE_BASE:latest
-
-          echo "📦 Building image:"
-          echo " - $COMMIT_IMAGE"
-          echo " - $LATEST_IMAGE"
-
-          docker build \
-            -t $COMMIT_IMAGE \
-            -t $LATEST_IMAGE \
-            .
-
-          docker push $COMMIT_IMAGE
-          docker push $LATEST_IMAGE
-
+          IMAGE_NAME=ghcr.io/$USERNAME/assetnext:latest
+          echo "📦 Building image: $IMAGE_NAME"
+          docker build -t $IMAGE_NAME .
+          docker push $IMAGE_NAME
       - name: 🚀 Deploy to remote server
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -48,23 +33,24 @@ jobs:
           command_timeout: 20m
           script: |
             set -e
-
             USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
             APP_IMAGE=ghcr.io/$USERNAME/assetnext:latest
-
             DB_CONTAINER=assetnext_db
             APP_CONTAINER=assetnext_app
             NETWORK_NAME=asset_network
 
-            echo "🧹 Stopping existing app container..."
-            docker stop $APP_CONTAINER 2>/dev/null || true
+            echo "🧹 Removing existing app container (if any)..."
             docker rm -f $APP_CONTAINER 2>/dev/null || true
-            
-            echo "🧹 Cleaning up any orphaned containers..."
-            docker container prune -f 2>/dev/null || true
 
             echo "🌐 Creating Docker network..."
             docker network create $NETWORK_NAME || true
+
+            echo "🧹 Cleaning up old Docker images to free disk space..."
+            docker image prune -af --filter "until=24h" || true
+            docker container prune -f || true
+            docker builder prune -af || true
+            echo "💾 Disk space after cleanup:"
+            df -h / | tail -1
 
             echo "📦 Pulling latest app image..."
             docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} -p ${{ secrets.GHCR_TOKEN }}
@@ -75,6 +61,7 @@ jobs:
 
             echo "🐘 Ensuring Postgres container is running..."
             if ! docker ps --format '{{.Names}}' | grep -q "^${DB_CONTAINER}$"; then
+              echo "Starting new Postgres container..."
               docker rm $DB_CONTAINER 2>/dev/null || true
               docker run -d \
                 --name $DB_CONTAINER \
@@ -86,8 +73,11 @@ jobs:
                 -v asset_pgdata:/var/lib/postgresql/data \
                 --restart unless-stopped \
                 postgres:15-alpine
+              echo "⏳ Waiting 15s for DB to initialize..."
               sleep 15
             else
+              echo "Postgres container already running"
+              # Ensure it's on the right network
               docker network connect $NETWORK_NAME $DB_CONTAINER 2>/dev/null || true
             fi
 
@@ -115,20 +105,15 @@ jobs:
             sleep 10
 
             echo "🔍 Checking container status..."
-            echo "📊 Container status:"
-            docker ps -a --filter "name=$APP_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-            
-            echo "📋 App container logs:"
-            docker logs $APP_CONTAINER || echo "No logs available"
-            
             if docker ps --format '{{.Names}}' | grep -q "^${APP_CONTAINER}$"; then
-              echo "✅ Deployment successful!"
-              echo "🔗 App should be running on port 5926"
+              echo "✅ Container is running!"
+              echo "📋 Container logs (last 20 lines):"
+              docker logs --tail 20 $APP_CONTAINER
             else
-              echo "❌ Deployment failed!"
-              echo "🐘 DB container status:"
-              docker ps -a --filter "name=$DB_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-              echo "📋 DB container logs:"
-              docker logs --tail 10 $DB_CONTAINER || echo "No DB logs available"
+              echo "❌ Container failed to start!"
+              echo "📋 Container logs:"
+              docker logs $APP_CONTAINER 2>&1 || true
               exit 1
             fi
+
+            echo "✅ Deployment successful!!"
