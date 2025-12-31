@@ -45,6 +45,12 @@ jobs:
             echo "🌐 Creating Docker network..."
             docker network create $NETWORK_NAME || true
 
+              echo "🧹 Keeping only the last two assetnext images..."
+              IMAGE_IDS=$(docker images --format '{{.ID}} {{.Repository}} {{.Tag}} {{.CreatedAt}}' | grep 'ghcr.io/.*/assetnext' | sort -rk4 | awk '{print $1}' | tail -n +3)
+              for img_id in $IMAGE_IDS; do
+                echo "🗑️ Removing old assetnext image: $img_id"
+                docker rmi -f $img_id || true
+              done
 
             echo "📦 Pulling latest app image..."
             docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} -p ${{ secrets.GHCR_TOKEN }}
