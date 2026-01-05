@@ -17,6 +17,7 @@ jobs:
       - name: 🔑 Log in to GitHub Container Registry
         run: |
           echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+
       - name: 🏗️ Build and push app image
         run: |
           USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
@@ -24,6 +25,7 @@ jobs:
           echo "📦 Building image: $IMAGE_NAME"
           docker build -t $IMAGE_NAME .
           docker push $IMAGE_NAME
+
       - name: 🚀 Deploy to remote server
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -33,6 +35,7 @@ jobs:
           command_timeout: 20m
           script: |
             set -e
+
             USERNAME=$(echo "${{ secrets.GHCR_USERNAME }}" | tr '[:upper:]' '[:lower:]')
             APP_IMAGE=ghcr.io/$USERNAME/assetnext:latest
             DB_CONTAINER=assetnext_db
@@ -45,16 +48,21 @@ jobs:
             echo "🌐 Creating Docker network..."
             docker network create $NETWORK_NAME || true
 
-              echo "🧹 Keeping only the last two assetnext images..."
-              IMAGE_IDS=$(docker images --format '{{.ID}} {{.Repository}} {{.Tag}} {{.CreatedAt}}' | grep 'ghcr.io/.*/assetnext' | sort -rk4 | awk '{print $1}' | tail -n +3)
-              for img_id in $IMAGE_IDS; do
-                echo "🗑️ Removing old assetnext image: $img_id"
-                docker rmi -f $img_id || true
-              done
-
             echo "📦 Pulling latest app image..."
             docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} -p ${{ secrets.GHCR_TOKEN }}
             docker pull $APP_IMAGE
+
+            echo "🧹 Cleaning old assetnext images only (safe)"
+            docker images --format '{{.Repository}} {{.ID}} {{.Tag}} {{.CreatedAt}}' \
+              | grep '^ghcr.io/.*/assetnext ' \
+              | grep -v ':latest' \
+              | awk '{print $2}' \
+              | sort -u \
+              | tail -n +3 \
+              | while read img_id; do
+                  echo "🗑️ Removing old assetnext image digest: $img_id"
+                  docker rmi -f "$img_id" || true
+                done
 
             echo "🗄️ Creating volume for Postgres..."
             docker volume create asset_pgdata || true
@@ -77,7 +85,6 @@ jobs:
               sleep 15
             else
               echo "Postgres container already running"
-              # Ensure it's on the right network
               docker network connect $NETWORK_NAME $DB_CONTAINER 2>/dev/null || true
             fi
 
